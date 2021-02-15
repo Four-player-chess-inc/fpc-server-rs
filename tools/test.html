@@ -1,0 +1,36 @@
+<html>
+<head>
+    <meta charset="utf-8">
+    <script>
+    document.addEventListener('DOMContentLoaded', function(){
+            const webSocket = new WebSocket('ws://127.0.0.1:8080');
+
+            webSocket.onopen = event => {
+                console.log('onopen');
+                //webSocket.send("Hello Web Socket!");
+            };
+
+            webSocket.onmessage = event => {
+                console.log('onmessage, ' + event.data);
+            };
+
+            webSocket.onclose = event => {
+                console.log('onclose');
+            };
+
+            text_area = document.getElementById("ta");
+            submit = document.getElementById("sub");
+
+            submit.onclick = event => {
+                console.log(text_area.value);
+                webSocket.send(text_area.value);
+            }
+    });
+
+        </script>
+</head>
+<body>
+</body>
+<textarea cols="100" rows="30" id="ta"></textarea>
+<input type="submit" id="sub"/>
+</html>
