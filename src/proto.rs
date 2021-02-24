@@ -5,13 +5,13 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Protocol {
     SupportedVersion(Vec<String>),
-    Version(String)
+    Version(String),
 }
 
 #[serde(rename_all = "snake_case")]
 #[derive(Debug, Serialize, Deserialize)]
 pub enum GetInfoError {
-    UnspecifiedError { description: String }
+    UnspecifiedError { description: String },
 }
 
 #[serde(rename_all = "snake_case")]
@@ -19,35 +19,41 @@ pub enum GetInfoError {
 pub enum GetInfo {
     Request {},
     Ok { protocol: Protocol },
-    Error(GetInfoError)
+    Error(GetInfoError),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Server {
     name: String,
-    version: String
+    version: String,
 }
 
 #[serde(rename_all = "snake_case")]
 #[derive(Debug, Serialize, Deserialize)]
 pub enum ConnectError {
     UnsupportedProtocolVersion { description: String },
-    UnspecifiedError { description: String }
+    UnspecifiedError { description: String },
 }
 
 #[serde(rename_all = "snake_case")]
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Connect {
-    Client { name: String, version: String, protocol: Protocol },
-    Ok { server: Server },
-    Error(ConnectError)
+    Client {
+        name: String,
+        version: String,
+        protocol: Protocol,
+    },
+    Ok {
+        server: Server,
+    },
+    Error(ConnectError),
 }
 
 #[serde(rename_all = "snake_case")]
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Handshake {
     GetInfo(GetInfo),
-    Connect(Connect)
+    Connect(Connect),
 }
 
 // MatchmakingQueue ///////////////////////////
@@ -80,5 +86,4 @@ pub enum MatchmakingQueue {
 pub enum Pdu {
     Handshake(Handshake),
     MatchmakingQueue(MatchmakingQueue),
-
 }

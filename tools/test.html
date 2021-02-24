@@ -11,7 +11,7 @@
             };
 
             webSocket.onmessage = event => {
-                console.log('onmessage, ' + event.data);
+                console.log('recv ' + event.data);
             };
 
             webSocket.onclose = event => {
@@ -22,7 +22,7 @@
             submit = document.getElementById("sub");
 
             submit.onclick = event => {
-                console.log(text_area.value);
+                console.log('send');
                 webSocket.send(text_area.value);
             }
     });
