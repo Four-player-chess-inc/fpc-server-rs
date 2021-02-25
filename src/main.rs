@@ -42,56 +42,37 @@ use serde::Serialize;
 use tokio::net::{TcpListener, TcpStream};
 use tungstenite::protocol::Message;
 
-/*
-static GET_INFO_RESPONSE: Pdu = Pdu::Handshake(
-    Handshake::GetInfo(
-        GetInfo::Ok {
-            protocol: Protocol::SupportedVersion(["0"])
-        }
-    )
-);
- */
+use anyhow::{Context, Result};
+
+
 
 type Tx = UnboundedSender<Message>;
 type PeerMap = Arc<Mutex<HashMap<SocketAddr, Tx>>>;
 //type UnorderedPeers = Arc<Mutex>
 
-fn process_msg(pdu: &Pdu, peer_map: &PeerMap, addr: &SocketAddr) {
-    /*let peers = peer_map.lock().unwrap();
-    peers
-        .get(addr)
-        .unwrap()
-        .unbounded_send(Message::Text(serde_json::to_string(pdu).unwrap()))
-        .unwrap();*/
+fn process_get_info(pdu: &Pdu, peer_map: &PeerMap, addr: &SocketAddr) -> Result<()> {
+    let resp = Pdu::Handshake(Handshake::GetInfo(GetInfo::Ok {
+        protocol: Protocol::SupportedVersion(vec![String::from("0")]),
+    }));
+    let resp = serde_json::to_string(&resp)?;
+    peer_map.lock().unwrap().get(addr).context(format!(
+        "get({}) from peer_map failed while GetInfo::Request",
+        addr
+    ))?.unbounded_send(Message::Text(resp))?;
+    Ok(())
+}
 
+fn process_msg(pdu: &Pdu, peer_map: &PeerMap, addr: &SocketAddr) -> Result<()> {
     match pdu {
         Pdu::Handshake(hs) => match hs {
             Handshake::GetInfo(gi) => match gi {
-                GetInfo::Request {} => {
-                    if let Some(me) = peer_map.lock().unwrap().get(addr) {
-                        let resp = Pdu::Handshake(Handshake::GetInfo(GetInfo::Ok {
-                            protocol: Protocol::SupportedVersion(vec![String::from("0")]),
-                        }));
-
-                        match serde_json::to_string(&resp) {
-                            Ok(resp) => {
-                                if let Err(e) = me.unbounded_send(Message::Text(resp)) {
-                                    error!("mpsc unbound_send failed with message \"{}\"", e);
-                                }
-                            }
-                            Err(e) => error!("serialize failed with message \"{}\"", e),
-                        }
-                    } else {
-                        error!("get({}) from peer_map failed while GetInfo::Request", addr);
-                    }
-                }
-                _ => (),
+                GetInfo::Request {} => process_get_info(pdu, peer_map, addr),
+                _ => Ok(()),
             },
-            _ => (),
+            _ => Ok(()),
         },
-        Pdu::MatchmakingQueue(_) => (),
+        Pdu::MatchmakingQueue(_) => Ok(()),
     }
-    //println!("qweqwe");
 }
 
 async fn handle_connection(peer_map: PeerMap, raw_stream: TcpStream, addr: SocketAddr) {
@@ -137,18 +118,6 @@ async fn handle_connection(peer_map: PeerMap, raw_stream: TcpStream, addr: Socke
                 addr, e
             ),
         }
-
-        /*let peers = peer_map.lock().unwrap();
-
-        // We want to broadcast the message to everyone except ourselves.
-        let broadcast_recipients = peers
-            .iter()
-            .filter(|(peer_addr, _)| peer_addr != &&addr)
-            .map(|(_, ws_sink)| ws_sink);
-
-        for recp in broadcast_recipients {
-            recp.unbounded_send(msg.clone()).unwrap();
-        }*/
 
         future::ok(())
     });
