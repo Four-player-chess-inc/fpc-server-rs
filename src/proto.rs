@@ -24,8 +24,8 @@ pub enum GetInfo {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Server {
-    name: String,
-    version: String,
+    pub name: String,
+    pub version: String,
 }
 
 #[serde(rename_all = "snake_case")]

@@ -1,25 +1,6 @@
-//! A chat server that broadcasts a message to all connections.
-//!
-//! This is a simple line-based server which accepts WebSocket connections,
-//! reads lines from those connections, and broadcasts the lines to all other
-//! connected clients.
-//!
-//! You can test this out by running:
-//!
-//!     cargo run --example server 127.0.0.1:12345
-//!
-//! And then in another window run:
-//!
-//!     cargo run --example client ws://127.0.0.1:12345/
-//!
-//! You can run the second command in multiple windows and then chat between the
-//! two, seeing the messages from the other client as they're received. For all
-//! connected clients they'll all join the same room and see everyone else's
-//! messages.
-
 mod proto;
 
-use proto::{GetInfo, Handshake, Pdu, Protocol};
+use proto::{Connect, ConnectError, GetInfo, Handshake, Pdu, Protocol, Server};
 
 use env_logger::Builder;
 use log::LevelFilter;
@@ -44,21 +25,84 @@ use tungstenite::protocol::Message;
 
 use anyhow::{Context, Result};
 
+struct ClientInfo {
+    name: String,
+    version: String,
+    protocol: String,
+}
 
+struct Peer {
+    tx: Tx,
+    client_info: Option<ClientInfo>,
+}
 
 type Tx = UnboundedSender<Message>;
-type PeerMap = Arc<Mutex<HashMap<SocketAddr, Tx>>>;
+type PeerMap = Arc<Mutex<HashMap<SocketAddr, Peer>>>;
 //type UnorderedPeers = Arc<Mutex>
 
-fn process_get_info(pdu: &Pdu, peer_map: &PeerMap, addr: &SocketAddr) -> Result<()> {
+const PROTO_VER: &str = "0";
+
+fn process_get_info(peer_map: &PeerMap, addr: &SocketAddr) -> Result<()> {
     let resp = Pdu::Handshake(Handshake::GetInfo(GetInfo::Ok {
-        protocol: Protocol::SupportedVersion(vec![String::from("0")]),
+        protocol: Protocol::SupportedVersion(vec![String::from(PROTO_VER)]),
     }));
     let resp = serde_json::to_string(&resp)?;
-    peer_map.lock().unwrap().get(addr).context(format!(
-        "get({}) from peer_map failed while GetInfo::Request",
-        addr
-    ))?.unbounded_send(Message::Text(resp))?;
+    peer_map
+        .lock()
+        .unwrap()
+        .get(addr)
+        .context(format!(
+            "get({}) from peer_map failed while GetInfo::Request",
+            addr
+        ))?
+        .tx
+        .unbounded_send(Message::Text(resp))?;
+    Ok(())
+}
+
+fn process_connect(
+    peer_map: &PeerMap,
+    addr: &SocketAddr,
+    name: &str,
+    version: &str,
+    proto_ver: &str,
+) -> Result<()> {
+    if proto_ver == PROTO_VER {
+        let resp = Pdu::Handshake(Handshake::Connect(Connect::Ok {
+            server: Server {
+                name: String::from("fpc-server-rs"),
+                version: String::from("0.0.1"),
+            },
+        }));
+        let resp = serde_json::to_string(&resp)?;
+        let mut lock = peer_map.lock().unwrap();
+        let mut me = lock
+            .get_mut(addr)
+            .context(format!("get({}) from peer_map failed", addr))?;
+        me.client_info = Some(ClientInfo {
+            name: String::from(name),
+            version: String::from(version),
+            protocol: String::from(proto_ver),
+        });
+        me.tx.unbounded_send(Message::Text(resp))?;
+    } else {
+        let resp = Pdu::Handshake(Handshake::Connect(Connect::Error(
+            ConnectError::UnsupportedProtocolVersion {
+                description: String::from("Unsupported client version"),
+            },
+        )));
+        let resp = serde_json::to_string(&resp)?;
+        peer_map
+            .lock()
+            .unwrap()
+            .get(addr)
+            .context(format!(
+                "get({}) from peer_map failed while GetInfo::Request",
+                addr
+            ))?
+            .tx
+            .unbounded_send(Message::Text(resp))?;
+    }
     Ok(())
 }
 
@@ -66,7 +110,20 @@ fn process_msg(pdu: &Pdu, peer_map: &PeerMap, addr: &SocketAddr) -> Result<()> {
     match pdu {
         Pdu::Handshake(hs) => match hs {
             Handshake::GetInfo(gi) => match gi {
-                GetInfo::Request {} => process_get_info(pdu, peer_map, addr),
+                GetInfo::Request {} => process_get_info(peer_map, addr),
+                _ => Ok(()),
+            },
+            Handshake::Connect(c) => match c {
+                Connect::Client {
+                    name,
+                    version,
+                    protocol,
+                } => match protocol {
+                    Protocol::Version(proto_ver) => {
+                        process_connect(peer_map, addr, name, version, proto_ver)
+                    }
+                    _ => Ok(()),
+                },
                 _ => Ok(()),
             },
             _ => Ok(()),
@@ -79,7 +136,6 @@ async fn handle_connection(peer_map: PeerMap, raw_stream: TcpStream, addr: Socke
     debug!("Incoming TCP connection from: {}", addr);
 
     let ws_stream = tokio_tungstenite::accept_async(raw_stream).await;
-    //.expect("Error during the websocket handshake occurred");
 
     let ws_stream = match ws_stream {
         Ok(s) => s,
@@ -96,7 +152,11 @@ async fn handle_connection(peer_map: PeerMap, raw_stream: TcpStream, addr: Socke
 
     // Insert the write part of this peer to the peer map.
     let (tx, rx) = unbounded();
-    peer_map.lock().unwrap().insert(addr, tx);
+    let peer = Peer {
+        tx,
+        client_info: None,
+    };
+    peer_map.lock().unwrap().insert(addr, peer);
 
     let (outgoing, incoming) = ws_stream.split();
 
@@ -111,7 +171,9 @@ async fn handle_connection(peer_map: PeerMap, raw_stream: TcpStream, addr: Socke
         match pdu {
             Ok(p) => {
                 debug!("{:?}", p);
-                process_msg(&p, &peer_map, &addr);
+                if let Err(e) = process_msg(&p, &peer_map, &addr) {
+                    error!("{}", e);
+                }
             }
             Err(e) => error!(
                 "Parsing received message from peer {} failed with message \"{}\"",
