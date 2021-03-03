@@ -1,6 +1,11 @@
 mod proto;
 
-use proto::{Connect, ConnectError, GetInfo, Handshake, Pdu, Protocol, Server};
+use proto::{
+    Connect, ConnectError, GetInfo, Handshake, MatchmakingQueue, Pdu, PlayerRegister, Protocol,
+    Server,
+};
+
+use tokio::time::{self, Duration};
 
 use env_logger::Builder;
 use log::LevelFilter;
@@ -23,6 +28,7 @@ use serde::Serialize;
 use tokio::net::{TcpListener, TcpStream};
 use tungstenite::protocol::Message;
 
+use crate::proto::PlayerRegisterError;
 use anyhow::{Context, Result};
 
 struct ClientInfo {
@@ -31,16 +37,30 @@ struct ClientInfo {
     protocol: String,
 }
 
+type Tx = UnboundedSender<Message>;
+
+#[derive(PartialEq)]
+enum PlayerState {
+    Idle,
+    MMQueue,
+    HeartbeatWait,
+    HeartbeatReady,
+    GameSession,
+}
+
 struct Peer {
     tx: Tx,
+    player_name: Option<String>,
+    state: PlayerState,
     client_info: Option<ClientInfo>,
 }
 
-type Tx = UnboundedSender<Message>;
+//type Peer = Arc<Mutex<PeerData>>;
 type PeerMap = Arc<Mutex<HashMap<SocketAddr, Peer>>>;
-//type UnorderedPeers = Arc<Mutex>
 
 const PROTO_VER: &str = "0";
+const SERV_NAME: &str = "fpc-server-rs";
+const SERV_VER: &str = "0.0.1";
 
 fn process_get_info(peer_map: &PeerMap, addr: &SocketAddr) -> Result<()> {
     let resp = Pdu::Handshake(Handshake::GetInfo(GetInfo::Ok {
@@ -51,10 +71,7 @@ fn process_get_info(peer_map: &PeerMap, addr: &SocketAddr) -> Result<()> {
         .lock()
         .unwrap()
         .get(addr)
-        .context(format!(
-            "get({}) from peer_map failed while GetInfo::Request",
-            addr
-        ))?
+        .context(format!("get({}) from peer_map failed", addr))?
         .tx
         .unbounded_send(Message::Text(resp))?;
     Ok(())
@@ -70,8 +87,8 @@ fn process_connect(
     if proto_ver == PROTO_VER {
         let resp = Pdu::Handshake(Handshake::Connect(Connect::Ok {
             server: Server {
-                name: String::from("fpc-server-rs"),
-                version: String::from("0.0.1"),
+                name: String::from(SERV_NAME),
+                version: String::from(SERV_VER),
             },
         }));
         let resp = serde_json::to_string(&resp)?;
@@ -96,12 +113,41 @@ fn process_connect(
             .lock()
             .unwrap()
             .get(addr)
-            .context(format!(
-                "get({}) from peer_map failed while GetInfo::Request",
-                addr
-            ))?
+            .context(format!("get({}) from peer_map failed", addr))?
             .tx
             .unbounded_send(Message::Text(resp))?;
+    }
+    Ok(())
+}
+
+fn process_player_reg_mm_queue(peer_map: &PeerMap, addr: &SocketAddr, name: &str) -> Result<()> {
+    let mut lock = peer_map.lock().unwrap();
+    let mut me = lock
+        .get_mut(addr)
+        .context(format!("get({}) from peer_map failed", addr))?;
+
+    match me.state {
+        PlayerState::Idle => {
+            me.player_name = Some(name.to_string());
+            me.state = PlayerState::MMQueue;
+            let resp =
+                Pdu::MatchmakingQueue(MatchmakingQueue::PlayerRegister(PlayerRegister::Ok {
+                    session_id: 5.to_string(),
+                }));
+            let resp = serde_json::to_string(&resp)?;
+            me.tx.unbounded_send(Message::Text(resp))?;
+        }
+        _ => {
+            let resp = Pdu::MatchmakingQueue(MatchmakingQueue::PlayerRegister(
+                PlayerRegister::Error(PlayerRegisterError::AlreadyRegistered {
+                    description: "You are already in matchmaking queue or active game session"
+                        .to_string(),
+                }),
+            ));
+            let resp = serde_json::to_string(&resp)?;
+            me.tx.unbounded_send(Message::Text(resp))?;
+        }
+        _ => (),
     }
     Ok(())
 }
@@ -128,7 +174,14 @@ fn process_msg(pdu: &Pdu, peer_map: &PeerMap, addr: &SocketAddr) -> Result<()> {
             },
             _ => Ok(()),
         },
-        Pdu::MatchmakingQueue(_) => Ok(()),
+        Pdu::MatchmakingQueue(mq) => match mq {
+            MatchmakingQueue::PlayerRegister(pr) => match pr {
+                PlayerRegister::Name(name) => process_player_reg_mm_queue(peer_map, addr, name),
+                _ => Ok(()),
+            },
+            _ => Ok(()),
+        },
+        _ => Ok(()),
     }
 }
 
@@ -154,6 +207,8 @@ async fn handle_connection(peer_map: PeerMap, raw_stream: TcpStream, addr: Socke
     let (tx, rx) = unbounded();
     let peer = Peer {
         tx,
+        player_name: None,
+        state: PlayerState::Idle,
         client_info: None,
     };
     peer_map.lock().unwrap().insert(addr, peer);
@@ -194,6 +249,32 @@ async fn handle_connection(peer_map: PeerMap, raw_stream: TcpStream, addr: Socke
     peer_map.lock().unwrap().remove(&addr);
 }
 
+async fn heartbeat_sender(peer_map: PeerMap) {
+    let mut interval = time::interval(Duration::from_secs(2));
+    let heartbeat = Pdu::MatchmakingQueue(MatchmakingQueue::HeartbeatCheck {});
+    let heartbeat = serde_json::to_string(&heartbeat).unwrap();
+    let heartbeat = Message::Text(heartbeat);
+    loop {
+        interval.tick().await;
+        let mut lock = peer_map.lock().unwrap();
+        let mm_queuers: Vec<&mut Peer> = lock
+            .iter_mut()
+            .filter(|(peer_addr, peer)| peer.state == PlayerState::MMQueue)
+            .take(4)
+            .map(|(_, peer)| peer)
+            .collect();
+        if mm_queuers.len() == 4 {
+            for peer in mm_queuers {
+                peer.state = PlayerState::HeartbeatWait;
+                match peer.tx.unbounded_send(heartbeat.clone()) {
+                    Ok(_) => peer.state = PlayerState::HeartbeatWait,
+                    Err(e) => error!("unbounded_send failed \"{}\"", e)
+                }
+            }
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), IoError> {
     let mut builder = Builder::new();
@@ -209,6 +290,8 @@ async fn main() -> Result<(), IoError> {
     let try_socket = TcpListener::bind(&addr).await;
     let listener = try_socket.expect("Failed to bind");
     info!("Listening on: {}", addr);
+
+    tokio::spawn(heartbeat_sender(state.clone()));
 
     // Let's spawn the handling of each connection in a separate task.
     while let Ok((stream, addr)) = listener.accept().await {

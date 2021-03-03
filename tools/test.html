@@ -8,6 +8,7 @@
             webSocket.onopen = event => {
                 console.log('onopen');
                 //webSocket.send("Hello Web Socket!");
+                document.cookie = "test=testing; SameSite=None; Secure";
             };
 
             webSocket.onmessage = event => {

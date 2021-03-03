@@ -62,7 +62,6 @@ pub enum Handshake {
 pub enum PlayerRegisterError {
     BadName { description: String },
     AlreadyRegistered { description: String },
-    QueueIsFull { description: String },
     UnspecifiedError { description: String },
 }
 
@@ -70,7 +69,7 @@ pub enum PlayerRegisterError {
 #[derive(Debug, Serialize, Deserialize)]
 pub enum PlayerRegister {
     Name(String),
-    Ok { id: u8 },
+    Ok { session_id: String },
     Error(PlayerRegisterError),
 }
 
@@ -79,6 +78,8 @@ pub enum PlayerRegister {
 pub enum MatchmakingQueue {
     PlayerRegister(PlayerRegister),
     PlayerLeave {},
+    HeartbeatCheck {},
+    PlayerKick {},
 }
 
 #[serde(rename_all = "snake_case")]
