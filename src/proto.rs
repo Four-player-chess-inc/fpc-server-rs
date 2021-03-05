@@ -82,9 +82,46 @@ pub enum MatchmakingQueue {
     PlayerKick {},
 }
 
+// GameSession ///////////////////////////
+#[serde(rename_all = "snake_case")]
+#[derive(Debug, Serialize, Deserialize)]
+pub struct LeftRook {
+    pub letter: char,
+    pub number: u8,
+}
+
+#[serde(rename_all = "snake_case")]
+#[derive(Debug, Serialize, Deserialize)]
+pub struct StartPosition {
+    pub player_name: String,
+    pub left_rook: LeftRook,
+}
+
+#[serde(rename_all = "snake_case")]
+#[derive(Debug, Serialize, Deserialize)]
+pub struct StartPositions {
+    pub red: StartPosition,
+    pub green: StartPosition,
+    pub blue: StartPosition,
+    pub yellow: StartPosition,
+}
+
+#[serde(rename_all = "snake_case")]
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Init {
+    pub countdown: u32,
+    pub start_positions: StartPositions,
+}
+
+#[serde(rename_all = "snake_case")]
+#[derive(Debug, Serialize, Deserialize)]
+pub enum GameSession {
+    Init(Init),
+}
 #[serde(rename_all = "snake_case")]
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Pdu {
     Handshake(Handshake),
     MatchmakingQueue(MatchmakingQueue),
+    GameSession(GameSession),
 }
