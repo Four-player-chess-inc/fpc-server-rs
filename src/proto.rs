@@ -79,7 +79,7 @@ pub enum MatchmakingQueue {
     PlayerRegister(PlayerRegister),
     PlayerLeave {},
     HeartbeatCheck {},
-    PlayerKick {},
+    PlayerKick { discritpion: String },
 }
 
 // GameSession ///////////////////////////
@@ -109,14 +109,28 @@ pub struct StartPositions {
 #[serde(rename_all = "snake_case")]
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Init {
-    pub countdown: u32,
+    pub countdown: u64,
     pub start_positions: StartPositions,
+}
+#[serde(rename_all = "snake_case")]
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Call {
+    pub player: String,
+    pub timer: u64,
+    pub timer_2: u64,
+}
+
+#[serde(rename_all = "snake_case")]
+#[derive(Debug, Serialize, Deserialize)]
+pub enum Move {
+    Call(Call),
 }
 
 #[serde(rename_all = "snake_case")]
 #[derive(Debug, Serialize, Deserialize)]
 pub enum GameSession {
     Init(Init),
+    Move(Move),
 }
 #[serde(rename_all = "snake_case")]
 #[derive(Debug, Serialize, Deserialize)]

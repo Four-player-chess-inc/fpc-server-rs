@@ -1,13 +1,14 @@
 mod proto;
 
 use proto::{
-    Connect, ConnectError, GameSession, GetInfo, Handshake, Init, LeftRook, MatchmakingQueue, Pdu,
-    PlayerRegister, PlayerRegisterError, Protocol, Server, StartPosition, StartPositions,
+    Call, Connect, ConnectError, GameSession, GetInfo, Handshake, Init, LeftRook, MatchmakingQueue,
+    Move, Pdu, PlayerRegister, PlayerRegisterError, Protocol, Server, StartPosition,
+    StartPositions,
 };
 
 use tokio::time::{self};
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use env_logger::Builder;
 use log::LevelFilter;
@@ -29,6 +30,8 @@ use tungstenite::protocol::Message;
 
 use anyhow::{Context, Result};
 
+use std::string::ToString;
+
 struct ClientInfo {
     name: String,
     version: String,
@@ -43,6 +46,10 @@ enum Color {
     Blue,
     Yellow,
 }
+
+//impl ToStringColor {
+//    to_
+//}
 
 struct PlayerSession {
     game_id: u64,
@@ -98,9 +105,10 @@ type PeerMap = Arc<Mutex<HashMap<SocketAddr, Peer>>>;
 const PROTO_VER: &str = "0";
 const SERV_NAME: &str = "fpc-server-rs";
 const SERV_VER: &str = "0.0.1";
-const HB_DISP_INTERVAL_SEC: u64 = 1;
-const HB_DISP_WAIT_TIMEOUT_SEC: u64 = 2;
-const HB_DISP_READY_TIMEOUT_SEC: u64 = 5;
+static HB_DISP_TICK_PERIOD: tokio::time::Duration = tokio::time::Duration::from_secs(1);
+static HB_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
+static HB_READY_TIMEOUT: Duration = Duration::from_secs(5);
+static GS_INIT_PAUSE: tokio::time::Duration = tokio::time::Duration::from_secs(10);
 
 fn process_get_info(peer_map: &PeerMap, addr: &SocketAddr) -> Result<()> {
     let resp = Pdu::Handshake(Handshake::GetInfo(GetInfo::Ok {
@@ -279,6 +287,7 @@ async fn handle_connection(peer_map: PeerMap, raw_stream: TcpStream, addr: Socke
         state: PlayerState::Idle,
         client_info: None,
     };
+    // TODO: prevent duplicate
     peer_map.lock().unwrap().insert(addr, peer);
 
     let (outgoing, incoming) = ws_stream.split();
@@ -317,7 +326,27 @@ async fn handle_connection(peer_map: PeerMap, raw_stream: TcpStream, addr: Socke
 }
 
 async fn game_session_starter(peer_map: PeerMap, game_id: u64) {
-
+    tokio::time::sleep(GS_INIT_PAUSE).await;
+    let call = Pdu::GameSession(GameSession::Move(Move::Call(Call {
+        player: "Red".to_string(),
+        timer: 10,
+        timer_2: 1,
+    })));
+    let call = serde_json::to_string(&call).unwrap();
+    let call = Message::Text(call);
+    let lock = peer_map.lock().unwrap();
+    let gamers = lock
+        .iter()
+        .filter(
+            |(_, peer)| matches!(&peer.state, PlayerState::GameSession(e) if e.game_id == game_id),
+        )
+        .map(|(_, peer)| peer);
+    for peer in gamers {
+        match peer.tx.unbounded_send(call.clone()) {
+            Ok(_) => (),
+            Err(e) => error!("unbounded_send failed \"{}\"", e),
+        }
+    }
 }
 
 // Looping infinitely. On loop tick, if we find at least 4 MMQueue players send HeartbeatCheck
@@ -325,7 +354,7 @@ async fn game_session_starter(peer_map: PeerMap, game_id: u64) {
 // Also, change state HearbeatReady => MMQueue if timeout
 // TODO: Disconnect Idle players?
 async fn heartbeat_dispatcher(peer_map: PeerMap) {
-    let mut interval = time::interval(tokio::time::Duration::from_secs(HB_DISP_INTERVAL_SEC));
+    let mut interval = time::interval(HB_DISP_TICK_PERIOD);
     let heartbeat = Pdu::MatchmakingQueue(MatchmakingQueue::HeartbeatCheck {});
     let heartbeat = serde_json::to_string(&heartbeat).unwrap();
     let heartbeat = Message::Text(heartbeat);
@@ -336,13 +365,12 @@ async fn heartbeat_dispatcher(peer_map: PeerMap) {
         let start = Instant::now();
         let mut lock = peer_map.lock().unwrap();
 
-        // Send heartbeat to 4 players wich in mmqueue state
+        // Send heartbeat to every 4 players wich in mmqueue state
         let mut mm_queuers: Vec<&mut Peer> = lock
             .iter_mut()
             .filter(|(_, peer)| peer.state == PlayerState::MMQueue)
             .map(|(_, peer)| peer)
             .collect();
-
         for chunk in mm_queuers.chunks_exact_mut(4) {
             for peer in chunk {
                 match peer.tx.unbounded_send(heartbeat.clone()) {
@@ -357,15 +385,15 @@ async fn heartbeat_dispatcher(peer_map: PeerMap) {
             .iter_mut()
             .filter(|(_, peer)| peer.state.is_hb_wait())
             .map(|(_, peer)| peer);
-        let kick = Pdu::MatchmakingQueue(MatchmakingQueue::PlayerKick {});
+        let kick = Pdu::MatchmakingQueue(MatchmakingQueue::PlayerKick {
+            discritpion: "Heartbeat timeout".to_string(),
+        });
         let kick = serde_json::to_string(&kick).unwrap();
         let kick = Message::Text(kick);
         let now = Instant::now();
         for peer in mm_waiters {
-            let wait_time = now
-                .duration_since(peer.state.get_hb_wait_since().unwrap())
-                .as_secs();
-            if wait_time > HB_DISP_WAIT_TIMEOUT_SEC {
+            let wait_time = now.duration_since(peer.state.get_hb_wait_since().unwrap());
+            if wait_time > HB_WAIT_TIMEOUT {
                 match peer.tx.unbounded_send(kick.clone()) {
                     Ok(_) => {
                         peer.state = PlayerState::Idle;
@@ -383,10 +411,8 @@ async fn heartbeat_dispatcher(peer_map: PeerMap) {
             .map(|(_, peer)| peer);
         let now = Instant::now();
         for peer in mm_ready {
-            let wait_time = now
-                .duration_since(peer.state.get_hb_ready_since().unwrap())
-                .as_secs();
-            if wait_time > HB_DISP_READY_TIMEOUT_SEC {
+            let wait_time = now.duration_since(peer.state.get_hb_ready_since().unwrap());
+            if wait_time > HB_READY_TIMEOUT {
                 peer.state = PlayerState::MMQueue;
             }
         }
@@ -400,6 +426,7 @@ async fn heartbeat_dispatcher(peer_map: PeerMap) {
         for chunk in mm_ready.chunks_exact_mut(4) {
             let mut iter = chunk.iter_mut();
             let red = iter.next().unwrap();
+            // TODO: prevent duplicate game_id
             red.state = PlayerState::GameSession(PlayerSession {
                 game_id,
                 color: Color::Red,
@@ -421,7 +448,7 @@ async fn heartbeat_dispatcher(peer_map: PeerMap) {
             });
 
             let init_pdu = Pdu::GameSession(GameSession::Init(Init {
-                countdown: 10,
+                countdown: GS_INIT_PAUSE.as_secs(),
                 start_positions: StartPositions {
                     red: StartPosition {
                         player_name: red.player_name.clone().unwrap(),
