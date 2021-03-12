@@ -1,5 +1,5 @@
 [package]
-name = "server-rs"
+name = "fpc-server-rs"
 version = "0.1.0"
 authors = ["h04x <liquid.doctrine@gmail.com>"]
 edition = "2018"

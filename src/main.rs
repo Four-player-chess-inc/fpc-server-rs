@@ -1,9 +1,8 @@
 mod proto;
 
 use proto::{
-    Call, Connect, ConnectError, GameSession, GetInfo, Handshake, Init, LeftRook, MatchmakingQueue,
-    Move, Pdu, PlayerRegister, PlayerRegisterError, Protocol, Server, StartPosition,
-    StartPositions,
+    Call, Connect, ConnectError, GetInfo, Handshake, Init, LeftRook, MatchmakingQueue, Move, Pdu,
+    PlayerRegister, PlayerRegisterError, Protocol, Server, StartPosition, StartPositions,
 };
 
 use tokio::time::{self};
@@ -47,13 +46,39 @@ enum Color {
     Yellow,
 }
 
-//impl ToStringColor {
-//    to_
-//}
+impl ToString for Color {
+    fn to_string(&self) -> String {
+        match self {
+            Color::Red => "Red".to_string(),
+            Color::Green => "Green".to_string(),
+            Color::Blue => "Blue".to_string(),
+            Color::Yellow => "Yellow".to_string(),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct Timer {
+    timer_1: Duration,
+    timer_2: Duration
+}
+
+struct Timers {
+    red: Timer,
+    green: Timer,
+    blue: Timer,
+    yellow: Timer
+}
+
+struct GameSession {
+    who_move: Color,
+    timers : Timers
+}
 
 struct PlayerSession {
     game_id: u64,
     color: Color,
+    game_session: Arc<Mutex<GameSession>>,
 }
 
 impl PartialEq for PlayerSession {
@@ -109,6 +134,8 @@ static HB_DISP_TICK_PERIOD: tokio::time::Duration = tokio::time::Duration::from_
 static HB_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
 static HB_READY_TIMEOUT: Duration = Duration::from_secs(5);
 static GS_INIT_PAUSE: tokio::time::Duration = tokio::time::Duration::from_secs(10);
+static PLAYER_INITIAL_TIMER_1: Duration = Duration::from_secs(10);
+static PLAYER_INITIAL_TIMER_2: Duration = Duration::from_secs(2);
 
 fn process_get_info(peer_map: &PeerMap, addr: &SocketAddr) -> Result<()> {
     let resp = Pdu::Handshake(Handshake::GetInfo(GetInfo::Ok {
@@ -306,7 +333,7 @@ async fn handle_connection(peer_map: PeerMap, raw_stream: TcpStream, addr: Socke
                 if let Err(e) = process_msg(&p, &peer_map, &addr) {
                     error!("{}", e);
                 }
-            }
+            },
             Err(e) => error!(
                 "Parsing received message from peer {} failed with message \"{}\"",
                 addr, e
@@ -327,7 +354,7 @@ async fn handle_connection(peer_map: PeerMap, raw_stream: TcpStream, addr: Socke
 
 async fn game_session_starter(peer_map: PeerMap, game_id: u64) {
     tokio::time::sleep(GS_INIT_PAUSE).await;
-    let call = Pdu::GameSession(GameSession::Move(Move::Call(Call {
+    let call = Pdu::GameSession(proto::GameSession::Move(Move::Call(Call {
         player: "Red".to_string(),
         timer: 10,
         timer_2: 1,
@@ -426,28 +453,46 @@ async fn heartbeat_dispatcher(peer_map: PeerMap) {
         for chunk in mm_ready.chunks_exact_mut(4) {
             let mut iter = chunk.iter_mut();
             let red = iter.next().unwrap();
+            let initial_timer = Timer {
+                timer_1: PLAYER_INITIAL_TIMER_1,
+                timer_2: PLAYER_INITIAL_TIMER_2
+            };
+            let initial_timers = Timers {
+                red: initial_timer,
+                green: initial_timer,
+                blue: initial_timer,
+                yellow: initial_timer
+            };
+            let game_session = Arc::new(Mutex::new(GameSession {
+                who_move: Color::Red,
+                timers: initial_timers
+            }));
             // TODO: prevent duplicate game_id
             red.state = PlayerState::GameSession(PlayerSession {
                 game_id,
                 color: Color::Red,
+                game_session: game_session.clone(),
             });
             let green = iter.next().unwrap();
             green.state = PlayerState::GameSession(PlayerSession {
                 game_id,
                 color: Color::Green,
+                game_session: game_session.clone(),
             });
             let blue = iter.next().unwrap();
             blue.state = PlayerState::GameSession(PlayerSession {
                 game_id,
                 color: Color::Blue,
+                game_session: game_session.clone(),
             });
             let yellow = iter.next().unwrap();
             yellow.state = PlayerState::GameSession(PlayerSession {
                 game_id,
                 color: Color::Yellow,
+                game_session: game_session.clone(),
             });
 
-            let init_pdu = Pdu::GameSession(GameSession::Init(Init {
+            let init_pdu = Pdu::GameSession(proto::GameSession::Init(Init {
                 countdown: GS_INIT_PAUSE.as_secs(),
                 start_positions: StartPositions {
                     red: StartPosition {
