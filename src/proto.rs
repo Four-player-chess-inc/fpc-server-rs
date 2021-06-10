@@ -62,6 +62,7 @@ pub enum Handshake {
 pub enum PlayerRegisterError {
     BadName { description: String },
     AlreadyRegistered { description: String },
+    Handshake { description: String },
     UnspecifiedError { description: String },
 }
 

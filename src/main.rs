@@ -1,9 +1,8 @@
 mod proto;
 
 use proto::{
-    Call, Connect, ConnectError, GameSession, GetInfo, Handshake, Init, LeftRook, MatchmakingQueue,
-    Move, Pdu, PlayerRegister, PlayerRegisterError, Protocol, Server, StartPosition,
-    StartPositions,
+    Call, Connect, ConnectError, GetInfo, Handshake, Init, LeftRook, MatchmakingQueue, Move, Pdu,
+    PlayerRegister, PlayerRegisterError, Protocol, Server, StartPosition, StartPositions,
 };
 
 use tokio::time::{self};
@@ -22,7 +21,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use futures_channel::mpsc::{unbounded, UnboundedSender};
+use futures_channel::mpsc::{unbounded, UnboundedSender, UnboundedReceiver};
 use futures_util::{future, pin_mut, stream::TryStreamExt, StreamExt};
 
 use tokio::net::{TcpListener, TcpStream};
@@ -51,6 +50,31 @@ enum Color {
 //    to_
 //}
 
+struct Channel {
+    rx: UnboundedReceiver<Message>,
+    tx: UnboundedSender<Message>
+}
+
+struct Player {
+    color: Color,
+    timer: Duration,
+    channel: Option<Channel>
+}
+
+struct GameSession {
+    game_id: u64,
+    player_1: Player,
+    player_2: Player,
+    player_3: Player,
+    player_4: Player,
+}
+
+impl GameSession {
+    async fn test(&self) {
+
+    }
+}
+
 struct PlayerSession {
     game_id: u64,
     color: Color,
@@ -64,11 +88,12 @@ impl PartialEq for PlayerSession {
 
 #[derive(PartialEq)]
 enum PlayerState {
+    Unknown,
     Idle,
     MMQueue,
     HeartbeatWait(Instant),
     HeartbeatReady(Instant),
-    GameSession(PlayerSession),
+    GameSession(u64),
 }
 
 impl PlayerState {
@@ -110,7 +135,7 @@ static HB_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
 static HB_READY_TIMEOUT: Duration = Duration::from_secs(5);
 static GS_INIT_PAUSE: tokio::time::Duration = tokio::time::Duration::from_secs(10);
 
-fn process_get_info(peer_map: &PeerMap, addr: &SocketAddr) -> Result<()> {
+fn process_hs_get_info(peer_map: &PeerMap, addr: &SocketAddr) -> Result<()> {
     let resp = Pdu::Handshake(Handshake::GetInfo(GetInfo::Ok {
         protocol: Protocol::SupportedVersion(vec![String::from(PROTO_VER)]),
     }));
@@ -125,7 +150,7 @@ fn process_get_info(peer_map: &PeerMap, addr: &SocketAddr) -> Result<()> {
     Ok(())
 }
 
-fn process_connect(
+fn process_hs_connect(
     peer_map: &PeerMap,
     addr: &SocketAddr,
     name: &str,
@@ -149,6 +174,7 @@ fn process_connect(
             version: String::from(version),
             protocol: String::from(proto_ver),
         });
+        me.state = PlayerState::Idle;
         me.tx.unbounded_send(Message::Text(resp))?;
     } else {
         let resp = Pdu::Handshake(Handshake::Connect(Connect::Error(
@@ -174,32 +200,39 @@ fn process_mm_player_reg(peer_map: &PeerMap, addr: &SocketAddr, name: &str) -> R
         .get_mut(addr)
         .context(format!("get({}) from peer_map failed", addr))?;
 
+    let resp: Pdu;
     match me.state {
         PlayerState::Idle => {
             me.player_name = Some(name.to_string());
             me.state = PlayerState::MMQueue;
-            let resp =
+            resp =
                 Pdu::MatchmakingQueue(MatchmakingQueue::PlayerRegister(PlayerRegister::Ok {
                     // TODO: Insert hash
                     session_id: 5.to_string(),
                 }));
-            let resp = serde_json::to_string(&resp)?;
-            me.tx.unbounded_send(Message::Text(resp))?;
         }
         PlayerState::HeartbeatReady(_)
         | PlayerState::HeartbeatWait(_)
         | PlayerState::MMQueue
         | PlayerState::GameSession(_) => {
-            let resp = Pdu::MatchmakingQueue(MatchmakingQueue::PlayerRegister(
+            resp = Pdu::MatchmakingQueue(MatchmakingQueue::PlayerRegister(
                 PlayerRegister::Error(PlayerRegisterError::AlreadyRegistered {
                     description: "You are already in matchmaking queue or active game session"
                         .to_string(),
                 }),
             ));
-            let resp = serde_json::to_string(&resp)?;
-            me.tx.unbounded_send(Message::Text(resp))?;
+        }
+        PlayerState::Unknown => {
+            resp = Pdu::MatchmakingQueue(MatchmakingQueue::PlayerRegister(
+                PlayerRegister::Error(PlayerRegisterError::Handshake {
+                    description: "pass handshake first"
+                        .to_string(),
+                }),
+            ));
         }
     }
+    let resp = serde_json::to_string(&resp)?;
+    me.tx.unbounded_send(Message::Text(resp))?;
     Ok(())
 }
 
@@ -232,7 +265,7 @@ fn process_msg(pdu: &Pdu, peer_map: &PeerMap, addr: &SocketAddr) -> Result<()> {
     match pdu {
         Pdu::Handshake(hs) => match hs {
             Handshake::GetInfo(gi) => match gi {
-                GetInfo::Request {} => process_get_info(peer_map, addr),
+                GetInfo::Request {} => process_hs_get_info(peer_map, addr),
                 _ => Ok(()),
             },
             Handshake::Connect(c) => match c {
@@ -242,7 +275,7 @@ fn process_msg(pdu: &Pdu, peer_map: &PeerMap, addr: &SocketAddr) -> Result<()> {
                     protocol,
                 } => match protocol {
                     Protocol::Version(proto_ver) => {
-                        process_connect(peer_map, addr, name, version, proto_ver)
+                        process_hs_connect(peer_map, addr, name, version, proto_ver)
                     }
                     _ => Ok(()),
                 },
@@ -284,7 +317,7 @@ async fn handle_connection(peer_map: PeerMap, raw_stream: TcpStream, addr: Socke
     let peer = Peer {
         tx,
         player_name: None,
-        state: PlayerState::Idle,
+        state: PlayerState::Unknown,
         client_info: None,
     };
     // TODO: prevent duplicate
@@ -325,9 +358,9 @@ async fn handle_connection(peer_map: PeerMap, raw_stream: TcpStream, addr: Socke
     peer_map.lock().unwrap().remove(&addr);
 }
 
-async fn game_session_starter(peer_map: PeerMap, game_id: u64) {
+async fn game_session_dispatcher(peer_map: PeerMap, game_id: u64) {
     tokio::time::sleep(GS_INIT_PAUSE).await;
-    let call = Pdu::GameSession(GameSession::Move(Move::Call(Call {
+    let call = Pdu::GameSession(proto::GameSession::Move(Move::Call(Call {
         player: "Red".to_string(),
         timer: 10,
         timer_2: 1,
@@ -365,16 +398,17 @@ async fn heartbeat_dispatcher(peer_map: PeerMap) {
         let start = Instant::now();
         let mut lock = peer_map.lock().unwrap();
 
-        // Send heartbeat to every 4 players wich in mmqueue state
+        // Send heartbeat to every 4 players which in MMQueue state
         let mut mm_queuers: Vec<&mut Peer> = lock
             .iter_mut()
             .filter(|(_, peer)| peer.state == PlayerState::MMQueue)
             .map(|(_, peer)| peer)
             .collect();
         for chunk in mm_queuers.chunks_exact_mut(4) {
+            let now = Instant::now();
             for peer in chunk {
                 match peer.tx.unbounded_send(heartbeat.clone()) {
-                    Ok(_) => peer.state = PlayerState::HeartbeatWait(Instant::now()),
+                    Ok(_) => peer.state = PlayerState::HeartbeatWait(now),
                     Err(e) => error!("unbounded_send failed \"{}\"", e),
                 }
             }
@@ -405,6 +439,8 @@ async fn heartbeat_dispatcher(peer_map: PeerMap) {
         }
 
         // HeartbeatReady => MMQueue if timeout
+        // This require coz group of four player may not get ready
+        // for a long time due to other players leave by HeartbeatWait timeout.
         let mm_ready = lock
             .iter_mut()
             .filter(|(_, peer)| peer.state.is_hb_ready())
@@ -447,7 +483,7 @@ async fn heartbeat_dispatcher(peer_map: PeerMap) {
                 color: Color::Yellow,
             });
 
-            let init_pdu = Pdu::GameSession(GameSession::Init(Init {
+            let init_pdu = Pdu::GameSession(proto::GameSession::Init(Init {
                 countdown: GS_INIT_PAUSE.as_secs(),
                 start_positions: StartPositions {
                     red: StartPosition {
@@ -488,7 +524,7 @@ async fn heartbeat_dispatcher(peer_map: PeerMap) {
                     Err(e) => error!("unbounded_send failed \"{}\"", e),
                 }
             }
-            tokio::spawn(game_session_starter(peer_map.clone(), game_id));
+            tokio::spawn(game_session_dispatcher(peer_map.clone(), game_id));
             game_id = game_id.wrapping_add(1);
         }
 
