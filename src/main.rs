@@ -1,10 +1,14 @@
+mod board;
 mod proto;
 mod vault;
 
 use proto::{
-    Call, Connect, ConnectError, GetInfo, Handshake, Init, LeftRook, MatchmakingQueue, Move, Pdu,
-    PlayerRegister, PlayerRegisterError, Protocol, Server, StartPosition, StartPositions,
+    Call, Connect, ConnectError, GameSession, GetInfo, Handshake, Init, MakeElem, MatchmakingQueue,
+    Move, Pdu, PlayerRegister, PlayerRegisterError, Protocol, Server, StartPosition,
+    StartPositions,
 };
+
+use board::{Position, Board};
 use vault::{ClientInfo, Color, Game, Peer, PeerState, Player, PlayerState};
 
 use tokio::sync::{Mutex, RwLock};
@@ -14,16 +18,13 @@ use std::time::{Duration, Instant};
 
 use env_logger::Builder;
 use log::LevelFilter;
-use log::{debug, error, info, warn, Level};
+use log::{debug, error, info};
 
-use std::{collections::HashMap, env, io::Error as IoError, net::SocketAddr, sync::Arc};
+use std::{env, io::Error as IoError, net::SocketAddr, sync::Arc};
 
-use futures::executor::block_on;
-use futures::stream::iter;
-use futures_channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
-use futures_util::{future, pin_mut, stream::TryStreamExt, StreamExt};
+use futures_channel::mpsc::unbounded;
+use futures_util::{future, pin_mut, StreamExt};
 use tokio::net::{TcpListener, TcpStream};
-use tungstenite::protocol::Message;
 
 use anyhow::{Context, Result};
 
@@ -32,8 +33,6 @@ use std::string::ToString;
 use rand::{distributions::Alphanumeric, Rng};
 
 type Vault = Arc<RwLock<vault::Vault>>;
-type PeerMap = Arc<Mutex<HashMap<SocketAddr, Peer>>>;
-type GameMap = Arc<RwLock<Vec<Game>>>;
 
 const PROTO_VER: &str = "0";
 const SERV_NAME: &str = "fpc-server-rs";
@@ -70,31 +69,19 @@ macro_rules! game_init_pdu {
             start_positions: StartPositions {
                 red: StartPosition {
                     player_name: $red,
-                    left_rook: LeftRook {
-                        letter: 'D',
-                        number: 1,
-                    },
-                },
-                green: StartPosition {
-                    player_name: $green,
-                    left_rook: LeftRook {
-                        letter: 'A',
-                        number: 11,
-                    },
+                    left_rook: Position::d1,
                 },
                 blue: StartPosition {
-                    player_name: $blue,
-                    left_rook: LeftRook {
-                        letter: 'K',
-                        number: 14,
-                    },
+                    player_name: $green,
+                    left_rook: Position::a11,
                 },
                 yellow: StartPosition {
+                    player_name: $blue,
+                    left_rook: Position::k14,
+                },
+                green: StartPosition {
                     player_name: $yellow,
-                    left_rook: LeftRook {
-                        letter: 'N',
-                        number: 4,
-                    },
+                    left_rook: Position::n4,
                 },
             },
         }))
@@ -188,7 +175,7 @@ async fn process_mm_player_reg(vault: &Vault, addr: &SocketAddr, name: &str) -> 
         PeerState::HeartbeatReady(_)
         | PeerState::HeartbeatWait(_)
         | PeerState::MMQueue
-        | PeerState::GameSession(_) => {
+        | PeerState::Game(_) => {
             let resp = Pdu::MatchmakingQueue(MatchmakingQueue::PlayerRegister(
                 PlayerRegister::Error(PlayerRegisterError::AlreadyRegistered {
                     description: "You are already in matchmaking queue or active game session"
@@ -242,6 +229,21 @@ async fn process_mm_heartbeat_check(vault: &Vault, addr: &SocketAddr) -> Result<
     Ok(())
 }
 
+async fn process_move_make(vault: &Vault, addr: &SocketAddr, make: &Vec<MakeElem>) -> Result<()> {
+    let lock = vault.write().await;
+    let peers_lock = lock.get_peers().await;
+    let peer = peers_lock
+        .get(addr)
+        .context(format!("get({}) from peer_map failed", addr))?;
+    let mut peer_lock = peer.lock().await;
+    if peer_lock.state.is_game() {
+        peer_lock.state = PeerState::HeartbeatReady(Instant::now());
+        let mut hb_ready_lock = lock.get_hb_ready().await;
+        hb_ready_lock.insert(*addr, peer.clone());
+    }
+    Ok(())
+}
+
 async fn process_msg(pdu: &Pdu, vault: &Vault, addr: &SocketAddr) -> Result<()> {
     match pdu {
         Pdu::Handshake(hs) => match hs {
@@ -272,7 +274,13 @@ async fn process_msg(pdu: &Pdu, vault: &Vault, addr: &SocketAddr) -> Result<()> 
             MatchmakingQueue::HeartbeatCheck {} => process_mm_heartbeat_check(vault, addr).await,
             _ => Ok(()),
         },
-        Pdu::GameSession(_) => Ok(()),
+        Pdu::GameSession(gs) => match gs {
+            GameSession::Move(mv) => match mv {
+                Move::Make(make_vec) => process_move_make(vault, addr, make_vec).await,
+                Move::Call(_) => Ok(()),
+            },
+            GameSession::Lost { .. } | GameSession::Init(_) => Ok(()),
+        },
     }
 }
 
@@ -312,12 +320,13 @@ async fn handle_connection(vault: Vault, raw_stream: TcpStream, addr: SocketAddr
         let msg = msg.unwrap();
         let pdu = serde_json::from_str::<Pdu>(msg.to_text().unwrap());
         debug!(
-            "Received a message from {}: \"{}\"",
+            "Received raw message from {}: \"{}\"",
             addr,
             msg.to_text().unwrap()
         );
         match pdu {
             Ok(p) => {
+                debug!("Parsed pdu: {:?}", p);
                 if let Err(e) = process_msg(&p, arg.1, arg.0).await {
                     error!("Error while process_msg() {}", e);
                 }
@@ -382,9 +391,37 @@ async fn player_timeout_dispatch(
     game_id: u64,
     player_color: Color,
     timeout: Duration,
-) {
+) -> Result<()> {
     tokio::time::sleep(timeout).await;
-    println!("dispatch");
+
+    let lock = vault.write().await;
+    let games_lock = lock.get_games().await;
+    let game = games_lock
+        .get(&game_id)
+        .context("game_session game lookup failed")?;
+    let mut game_lock = game.lock().await;
+    let players = game_lock.players_mut();
+
+    let lost_pdu = Pdu::GameSession(proto::GameSession::Lost {
+        player: player_color.to_string(),
+        description: "time over".to_string(),
+    })
+    .to_message()?;
+
+    for player in players {
+        if player_color == player.color {
+            player.state = PlayerState::Lost;
+            player.time_remaining = Duration::from_secs(0);
+        }
+        player
+            .peer
+            .lock()
+            .await
+            .tx
+            .unbounded_send(lost_pdu.clone())?;
+    }
+
+    Ok(())
 }
 
 // Looping infinitely. On loop tick, if we find at least 4 MMQueue players, send HeartbeatCheck
@@ -496,15 +533,15 @@ async fn heartbeat_dispatcher(vault: Vault) {
             let mut reconnect_lock = lock.get_reconnect().await;
             let mut tmp_peers = Vec::new();
             for (key, peer) in hb_ready_lock.iter() {
-                let mut peer_lock = peer.lock().await;
+                let peer_lock = peer.lock().await;
                 if peer_lock.state.is_hb_ready() {
                     tmp_peers.push((key, peer.clone(), peer_lock));
                     if tmp_peers.len() == 4 {
                         let mut iter = tmp_peers.iter_mut();
-                        let mut red = iter.next().unwrap();
-                        let mut green = iter.next().unwrap();
-                        let mut blue = iter.next().unwrap();
-                        let mut yellow = iter.next().unwrap();
+                        let red = iter.next().unwrap();
+                        let green = iter.next().unwrap();
+                        let blue = iter.next().unwrap();
+                        let yellow = iter.next().unwrap();
 
                         // TODO: check unique
                         let red_reconnect_id = random_string();
@@ -514,6 +551,7 @@ async fn heartbeat_dispatcher(vault: Vault) {
 
                         let game = Arc::new(Mutex::new(Game {
                             id: game_id,
+                            board: Board::new(),
                             red: Player {
                                 color: Color::Red,
                                 reconnect_id: red_reconnect_id.clone(),
@@ -550,10 +588,10 @@ async fn heartbeat_dispatcher(vault: Vault) {
                         reconnect_lock.insert(blue_reconnect_id.clone(), game.clone());
                         reconnect_lock.insert(yellow_reconnect_id.clone(), game.clone());
 
-                        red.2.state = PeerState::GameSession(game.clone());
-                        green.2.state = PeerState::GameSession(game.clone());
-                        blue.2.state = PeerState::GameSession(game.clone());
-                        yellow.2.state = PeerState::GameSession(game.clone());
+                        red.2.state = PeerState::Game(game.clone());
+                        green.2.state = PeerState::Game(game.clone());
+                        blue.2.state = PeerState::Game(game.clone());
+                        yellow.2.state = PeerState::Game(game.clone());
 
                         let red_name = red.2.player_name.clone().unwrap();
                         let green_name = green.2.player_name.clone().unwrap();

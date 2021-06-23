@@ -1,4 +1,5 @@
-use anyhow::{Context, Result};
+use crate::board::Position;
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use tungstenite::protocol::Message;
 
@@ -87,18 +88,18 @@ pub enum MatchmakingQueue {
 }
 
 // GameSession ///////////////////////////
-#[derive(Debug, Serialize, Deserialize)]
+/*#[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub struct LeftRook {
-    pub letter: char,
-    pub number: u8,
-}
+pub struct Position {
+    pub column: char,
+    pub row: u8,
+}*/
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct StartPosition {
     pub player_name: String,
-    pub left_rook: LeftRook,
+    pub left_rook: Position,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -128,15 +129,24 @@ pub struct Call {
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub struct Make {
+pub enum Action {
+    NoAction {},
+    Capture(Position),
+}
 
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct MakeElem {
+    from: Position,
+    to: Position,
+    action: Action,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Move {
     Call(Call),
-    Make(Make)
+    Make(Vec<MakeElem>),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -144,6 +154,7 @@ pub enum Move {
 pub enum GameSession {
     Init(Init),
     Move(Move),
+    Lost { player: String, description: String },
 }
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

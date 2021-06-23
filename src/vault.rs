@@ -1,18 +1,17 @@
-use futures_channel::mpsc::{unbounded, TrySendError, UnboundedReceiver, UnboundedSender};
+use anyhow::Result;
+use futures_channel::mpsc::UnboundedSender;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{Mutex, MutexGuard, RwLockReadGuard};
+use tokio::sync::{Mutex, MutexGuard};
 use tokio::task::JoinHandle;
 use tungstenite::protocol::Message;
-
-use crate::proto::Pdu;
+use crate::board::Board;
 
 type Tx = UnboundedSender<Message>;
 type PeerMap = HashMap<SocketAddr, Arc<Mutex<Peer>>>;
 type GameMap = HashMap<u64, Arc<Mutex<Game>>>;
-type PeerVec = Vec<Arc<Mutex<Peer>>>;
 type ReconnectMap = HashMap<String, Arc<Mutex<Game>>>;
 
 pub enum PeerState {
@@ -21,7 +20,37 @@ pub enum PeerState {
     MMQueue,
     HeartbeatWait(Instant),
     HeartbeatReady(Instant),
-    GameSession(Arc<Mutex<Game>>),
+    Game(Arc<Mutex<Game>>),
+}
+
+impl PeerState {
+    pub fn is_unknown(&self) -> bool {
+        matches!(self, PeerState::Unknown(_))
+    }
+    pub fn is_mm_queue(&self) -> bool {
+        matches!(self, PeerState::MMQueue)
+    }
+    pub fn is_hb_wait(&self) -> bool {
+        matches!(self, PeerState::HeartbeatWait(_))
+    }
+    pub fn get_hb_wait_since(&self) -> Option<Instant> {
+        match self {
+            PeerState::HeartbeatWait(i) => Some(*i),
+            _ => None,
+        }
+    }
+    pub fn is_hb_ready(&self) -> bool {
+        matches!(self, PeerState::HeartbeatReady(_))
+    }
+    pub fn get_hb_ready_since(&self) -> Option<Instant> {
+        match self {
+            PeerState::HeartbeatReady(i) => Some(*i),
+            _ => None,
+        }
+    }
+    pub fn is_game(&self) -> bool {
+        matches!(self, PeerState::Game(_))
+    }
 }
 
 pub struct ClientInfo {
@@ -70,67 +99,59 @@ pub enum PlayerState {
     Idle,
     TurnCallWait {
         at: tokio::time::Instant,
-        timeout_dispatcher: JoinHandle<()>,
+        timeout_dispatcher: JoinHandle<Result<()>>,
     },
-    Lost
+    Lost,
 }
 
 pub struct Player {
     pub color: Color,
     pub reconnect_id: String,
-    pub time_remaining: tokio::time::Duration,
+    pub time_remaining: Duration,
     pub state: PlayerState,
     pub peer: Arc<Mutex<Peer>>,
 }
 
 pub struct Game {
     pub id: u64,
+    pub board: Board,
     pub red: Player,
     pub green: Player,
     pub blue: Player,
     pub yellow: Player,
 }
 
-impl PeerState {
-    pub fn is_unknown(&self) -> bool {
-        matches!(self, PeerState::Unknown(_))
+impl Game {
+    pub fn players(&self) -> Vec<&Player> {
+        vec![&self.red, &self.green, &self.blue, &self.yellow]
     }
-    pub fn is_mm_queue(&self) -> bool {
-        matches!(self, PeerState::MMQueue)
+    pub fn players_mut(&mut self) -> Vec<&mut Player> {
+        vec![
+            &mut self.red,
+            &mut self.green,
+            &mut self.blue,
+            &mut self.yellow,
+        ]
     }
-    pub fn is_hb_wait(&self) -> bool {
-        matches!(self, PeerState::HeartbeatWait(_))
-    }
-    pub fn get_hb_wait_since(&self) -> Option<Instant> {
-        match self {
-            PeerState::HeartbeatWait(i) => Some(*i),
-            _ => None,
+    pub fn player(&self, color: &Color) -> &Player {
+        match color {
+            Color::Red => &self.red,
+            Color::Green => &self.green,
+            Color::Blue => &self.blue,
+            Color::Yellow => &self.yellow,
         }
     }
-    pub fn is_hb_ready(&self) -> bool {
-        matches!(self, PeerState::HeartbeatReady(_))
-    }
-    pub fn get_hb_ready_since(&self) -> Option<Instant> {
-        match self {
-            PeerState::HeartbeatReady(i) => Some(*i),
-            _ => None,
+    pub fn player_mut(&mut self, color: &Color) -> &mut Player {
+        match color {
+            Color::Red => &mut self.red,
+            Color::Green => &mut self.green,
+            Color::Blue => &mut self.blue,
+            Color::Yellow => &mut self.yellow,
         }
     }
 }
 
 impl Peer {
-    pub fn new(tx: Tx) -> Peer {
-        Peer {
-            tx: tx,
-            player_name: None,
-            state: PeerState::Unknown(Instant::now()),
-            client_info: None,
-        }
-    }
-    pub fn send(&self, msg: Message) -> Result<(), TrySendError<Message>> {
-        self.tx.unbounded_send(msg)
-    }
-
     pub fn set_state(&self, state: PeerState) {}
 }
 
@@ -185,19 +206,5 @@ impl<'a> Vault {
     }
     pub async fn get_reconnect(&'a self) -> MutexGuard<'a, ReconnectMap> {
         self.reconnect.lock().await
-    }
-}
-
-impl Game {
-    pub fn players(&self) -> Vec<&Player> {
-        vec![&self.red, &self.green, &self.blue, &self.yellow]
-    }
-    pub fn players_mut(&mut self) -> Vec<&mut Player> {
-        vec![
-            &mut self.red,
-            &mut self.green,
-            &mut self.blue,
-            &mut self.yellow,
-        ]
     }
 }
