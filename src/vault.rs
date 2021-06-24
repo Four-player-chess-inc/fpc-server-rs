@@ -1,3 +1,4 @@
+use crate::board::Board;
 use anyhow::Result;
 use futures_channel::mpsc::UnboundedSender;
 use std::collections::HashMap;
@@ -7,7 +8,6 @@ use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, MutexGuard};
 use tokio::task::JoinHandle;
 use tungstenite::protocol::Message;
-use crate::board::Board;
 
 type Tx = UnboundedSender<Message>;
 type PeerMap = HashMap<SocketAddr, Arc<Mutex<Peer>>>;
@@ -20,7 +20,10 @@ pub enum PeerState {
     MMQueue,
     HeartbeatWait(Instant),
     HeartbeatReady(Instant),
-    Game(Arc<Mutex<Game>>),
+    Game {
+        color: Color,
+        game: Arc<Mutex<Game>>,
+    },
 }
 
 impl PeerState {
@@ -49,7 +52,7 @@ impl PeerState {
         }
     }
     pub fn is_game(&self) -> bool {
-        matches!(self, PeerState::Game(_))
+        matches!(self, PeerState::Game { .. })
     }
 }
 
@@ -98,7 +101,7 @@ impl ToString for Color {
 pub enum PlayerState {
     Idle,
     TurnCallWait {
-        at: tokio::time::Instant,
+        since: tokio::time::Instant,
         timeout_dispatcher: JoinHandle<Result<()>>,
     },
     Lost,

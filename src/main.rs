@@ -8,7 +8,7 @@ use proto::{
     StartPositions,
 };
 
-use board::{Position, Board};
+use board::{Board, Position};
 use vault::{ClientInfo, Color, Game, Peer, PeerState, Player, PlayerState};
 
 use tokio::sync::{Mutex, RwLock};
@@ -175,7 +175,7 @@ async fn process_mm_player_reg(vault: &Vault, addr: &SocketAddr, name: &str) -> 
         PeerState::HeartbeatReady(_)
         | PeerState::HeartbeatWait(_)
         | PeerState::MMQueue
-        | PeerState::Game(_) => {
+        | PeerState::Game { .. } => {
             let resp = Pdu::MatchmakingQueue(MatchmakingQueue::PlayerRegister(
                 PlayerRegister::Error(PlayerRegisterError::AlreadyRegistered {
                     description: "You are already in matchmaking queue or active game session"
@@ -230,16 +230,30 @@ async fn process_mm_heartbeat_check(vault: &Vault, addr: &SocketAddr) -> Result<
 }
 
 async fn process_move_make(vault: &Vault, addr: &SocketAddr, make: &Vec<MakeElem>) -> Result<()> {
+    let now = tokio::time::Instant::now();
     let lock = vault.write().await;
     let peers_lock = lock.get_peers().await;
     let peer = peers_lock
         .get(addr)
         .context(format!("get({}) from peer_map failed", addr))?;
     let mut peer_lock = peer.lock().await;
-    if peer_lock.state.is_game() {
-        peer_lock.state = PeerState::HeartbeatReady(Instant::now());
-        let mut hb_ready_lock = lock.get_hb_ready().await;
-        hb_ready_lock.insert(*addr, peer.clone());
+    if let PeerState::Game { color, game } = &mut peer_lock.state {
+        let mut game_lock = game.lock().await;
+        let player = game_lock.player_mut(&color);
+        if let PlayerState::TurnCallWait { since, timeout_dispatcher } = &player.state {
+            match game_lock.make_turn(make) {
+
+            }
+            let turn_duration = now - *since;
+            if turn_duration > PLAYER_TIME_2 {
+                player.time_remaining -= turn_duration - PLAYER_TIME_2;
+            }
+            timeout_dispatcher.abort();
+        }
+
+        //peer_lock.state = PeerState::HeartbeatReady(Instant::now());
+        //let mut hb_ready_lock = lock.get_hb_ready().await;
+        //hb_ready_lock.insert(*addr, peer.clone());
     }
     Ok(())
 }
@@ -371,7 +385,7 @@ async fn game_init_dispatch(vault: Vault, game_id: u64) -> Result<()> {
     for player in game_lock.players_mut() {
         if player.color == turn_color {
             player.state = PlayerState::TurnCallWait {
-                at: tokio::time::Instant::now(),
+                since: tokio::time::Instant::now(),
                 timeout_dispatcher: tokio::spawn(player_timeout_dispatch(
                     vault.clone(),
                     game_id,
@@ -420,7 +434,6 @@ async fn player_timeout_dispatch(
             .tx
             .unbounded_send(lost_pdu.clone())?;
     }
-
     Ok(())
 }
 
@@ -428,7 +441,7 @@ async fn player_timeout_dispatch(
 // Also, kick (send kick pdu and change state to Idle) players, who did not response on HeartbeatCheck
 // Also, change state HearbeatReady => MMQueue if timeout
 // TODO: Disconnect Idle players?
-async fn heartbeat_dispatcher(vault: Vault) {
+async fn matchmaking_dispatcher(vault: Vault) {
     let mut interval = time::interval(HB_DISP_TICK_PERIOD);
 
     let heartbeat_pdu = Pdu::MatchmakingQueue(MatchmakingQueue::HeartbeatCheck {})
@@ -539,15 +552,15 @@ async fn heartbeat_dispatcher(vault: Vault) {
                     if tmp_peers.len() == 4 {
                         let mut iter = tmp_peers.iter_mut();
                         let red = iter.next().unwrap();
-                        let green = iter.next().unwrap();
                         let blue = iter.next().unwrap();
                         let yellow = iter.next().unwrap();
+                        let green = iter.next().unwrap();
 
                         // TODO: check unique
                         let red_reconnect_id = random_string();
-                        let green_reconnect_id = random_string();
                         let blue_reconnect_id = random_string();
                         let yellow_reconnect_id = random_string();
+                        let green_reconnect_id = random_string();
 
                         let game = Arc::new(Mutex::new(Game {
                             id: game_id,
@@ -558,13 +571,6 @@ async fn heartbeat_dispatcher(vault: Vault) {
                                 time_remaining: PLAYER_TIMER,
                                 state: PlayerState::Idle,
                                 peer: red.1.clone(),
-                            },
-                            green: Player {
-                                color: Color::Green,
-                                reconnect_id: green_reconnect_id.clone(),
-                                time_remaining: PLAYER_TIMER,
-                                state: PlayerState::Idle,
-                                peer: green.1.clone(),
                             },
                             blue: Player {
                                 color: Color::Blue,
@@ -580,36 +586,46 @@ async fn heartbeat_dispatcher(vault: Vault) {
                                 state: PlayerState::Idle,
                                 peer: yellow.1.clone(),
                             },
+                            green: Player {
+                                color: Color::Green,
+                                reconnect_id: green_reconnect_id.clone(),
+                                time_remaining: PLAYER_TIMER,
+                                state: PlayerState::Idle,
+                                peer: green.1.clone(),
+                            },
                         }));
 
                         games_lock.insert(game_id, game.clone());
                         reconnect_lock.insert(red_reconnect_id.clone(), game.clone());
-                        reconnect_lock.insert(green_reconnect_id.clone(), game.clone());
                         reconnect_lock.insert(blue_reconnect_id.clone(), game.clone());
                         reconnect_lock.insert(yellow_reconnect_id.clone(), game.clone());
+                        reconnect_lock.insert(green_reconnect_id.clone(), game.clone());
 
-                        red.2.state = PeerState::Game(game.clone());
-                        green.2.state = PeerState::Game(game.clone());
-                        blue.2.state = PeerState::Game(game.clone());
-                        yellow.2.state = PeerState::Game(game.clone());
+                        red.2.state = PeerState::Game {
+                            color: Color::Red,
+                            game: game.clone(),
+                        };
+                        blue.2.state = PeerState::Game {
+                            color: Color::Blue,
+                            game: game.clone(),
+                        };
+                        yellow.2.state = PeerState::Game {
+                            color: Color::Yellow,
+                            game: game.clone(),
+                        };
+                        green.2.state = PeerState::Game {
+                            color: Color::Green,
+                            game: game.clone(),
+                        };
 
                         let red_name = red.2.player_name.clone().unwrap();
-                        let green_name = green.2.player_name.clone().unwrap();
                         let blue_name = blue.2.player_name.clone().unwrap();
                         let yellow_name = red.2.player_name.clone().unwrap();
+                        let green_name = green.2.player_name.clone().unwrap();
 
                         let red_pdu = game_init_pdu!(
                             GS_INIT_PAUSE.as_secs(),
                             red_reconnect_id,
-                            red_name.clone(),
-                            green_name.clone(),
-                            blue_name.clone(),
-                            yellow_name.clone()
-                        )
-                        .unwrap();
-                        let green_pdu = game_init_pdu!(
-                            GS_INIT_PAUSE.as_secs(),
-                            green_reconnect_id,
                             red_name.clone(),
                             green_name.clone(),
                             blue_name.clone(),
@@ -634,12 +650,21 @@ async fn heartbeat_dispatcher(vault: Vault) {
                             yellow_name.clone()
                         )
                         .unwrap();
+                        let green_pdu = game_init_pdu!(
+                            GS_INIT_PAUSE.as_secs(),
+                            green_reconnect_id,
+                            red_name.clone(),
+                            green_name.clone(),
+                            blue_name.clone(),
+                            yellow_name.clone()
+                        )
+                        .unwrap();
 
                         for (peer, pdu) in [
                             (&red.2, red_pdu),
-                            (&green.2, green_pdu),
                             (&blue.2, blue_pdu),
                             (&yellow.2, yellow_pdu),
+                            (&green.2, green_pdu),
                         ]
                         .iter()
                         {
@@ -686,7 +711,7 @@ async fn main() -> Result<(), IoError> {
     let listener = try_socket.expect("Failed to bind");
     info!("Listening on: {}", addr);
 
-    tokio::spawn(heartbeat_dispatcher(vault.clone()));
+    tokio::spawn(matchmaking_dispatcher(vault.clone()));
 
     // Let's spawn the handling of each connection in a separate task.
     while let Ok((stream, addr)) = listener.accept().await {
