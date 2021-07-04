@@ -1,4 +1,4 @@
-use crate::board::Position;
+use crate::board::{Figure, Position};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use tungstenite::protocol::Message;
@@ -121,14 +121,6 @@ pub struct Init {
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub struct Call {
-    pub player: String,
-    pub timer: u64,
-    pub timer_2: u64,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub enum Action {
     NoAction {},
     Capture(Position),
@@ -136,17 +128,32 @@ pub enum Action {
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub struct MakeElem {
-    from: Position,
-    to: Position,
-    action: Action,
+pub enum MoveError {
+    ForbiddenMove { description: String },
+    UnspecifiedError { description: String },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Move {
-    Call(Call),
-    Make(Vec<MakeElem>),
+    Basic {
+        from: Position,
+        to: Position,
+    },
+    Capture {
+        from: Position,
+        to: Position,
+    },
+    Promotion {
+        from: Position,
+        to: Position,
+        into: Figure,
+    },
+    Castling {
+        rook: Position,
+    },
+    NoMove {},
+    Error(MoveError),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -154,8 +161,51 @@ pub enum Move {
 pub enum GameSession {
     Init(Init),
     Move(Move),
-    Lost { player: String, description: String },
+    Update(Update),
 }
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct MoveCall {
+    pub player: String,
+    pub timer: u64,
+    pub timer_2: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RemainingPieces {
+    Clear,
+    TurnToStone,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlayerState {
+    NoState {},
+    Check { from: Vec<Position> },
+    Checkmate {},
+    Stalemate {},
+    Lose { remaining_pieces: RemainingPieces },
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct PlayersStates {
+    pub red: PlayerState,
+    pub blue: PlayerState,
+    pub yellow: PlayerState,
+    pub green: PlayerState,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct Update {
+    pub move_call: MoveCall,
+    pub move_previous: Move,
+    pub players_states: PlayersStates,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Pdu {

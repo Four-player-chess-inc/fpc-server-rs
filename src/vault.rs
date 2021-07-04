@@ -1,6 +1,6 @@
 use crate::board::Board;
 use anyhow::Result;
-use futures_channel::mpsc::UnboundedSender;
+use futures::channel::mpsc::UnboundedSender;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -79,7 +79,7 @@ pub struct Vault {
     reconnect: Mutex<ReconnectMap>,
 }
 
-#[derive(PartialEq, Clone)]
+#[derive(PartialEq, Clone, Debug)]
 pub enum Color {
     Red,
     Green,
@@ -99,12 +99,14 @@ impl ToString for Color {
 }
 
 pub enum PlayerState {
-    Idle,
-    TurnCallWait {
-        since: tokio::time::Instant,
-        timeout_dispatcher: JoinHandle<Result<()>>,
-    },
+    NoState,
     Lost,
+}
+
+impl PlayerState {
+    /*pub fn is_idle(&self) -> bool {
+        matches!(self, PlayerState::Idle)
+    }*/
 }
 
 pub struct Player {
@@ -115,6 +117,11 @@ pub struct Player {
     pub peer: Arc<Mutex<Peer>>,
 }
 
+pub struct WhoMove {
+    pub color: Color,
+    pub since: tokio::time::Instant,
+}
+
 pub struct Game {
     pub id: u64,
     pub board: Board,
@@ -122,6 +129,8 @@ pub struct Game {
     pub green: Player,
     pub blue: Player,
     pub yellow: Player,
+    pub who_move: Option<WhoMove>,
+    pub move_happen_signal: UnboundedSender<Color>,
 }
 
 impl Game {
@@ -151,6 +160,51 @@ impl Game {
             Color::Blue => &mut self.blue,
             Color::Yellow => &mut self.yellow,
         }
+    }
+    /*pub fn next_move_mut(&mut self, cur_move: &Color) -> Option<&mut Player> {
+        let check = move |check_seq: &[Color]| -> Option<&mut Player> {
+            for color in check_seq {
+                let mut player = self.player(color);
+                match player.state {
+                    PlayerState::Idle => return Some(&mut player),
+                    PlayerState::MoveCallWait { .. } | PlayerState::Lost => continue
+                }
+            }
+            None
+        };
+        match cur_move {
+            Color::Red => {
+                let check_seq = [Color::Blue, Color::Yellow, Color::Green];
+                return check(&check_seq);
+            }
+            Color::Blue => {
+                let check_seq = [Color::Yellow, Color::Green, Color::Red];
+                return check(&check_seq);
+            }
+            Color::Yellow => {
+                let check_seq = [Color::Green, Color::Red, Color::Blue];
+                return check(&check_seq);
+            }
+            Color::Green => {
+                let check_seq = [Color::Red, Color::Blue, Color::Yellow];
+                return check(&check_seq);
+            }
+        }
+    }*/
+    pub async fn broadcast(&self, message: Message) -> Result<()> {
+        for player in self.players() {
+            player
+                .peer
+                .lock()
+                .await
+                .tx
+                .unbounded_send(message.clone())?
+        }
+        Ok(())
+    }
+    pub fn current_move_player_mut(&mut self) -> Option<&mut Player> {
+        let who_move = self.who_move.as_ref()?;
+        Some(self.player_mut(&who_move.color.clone()))
     }
 }
 

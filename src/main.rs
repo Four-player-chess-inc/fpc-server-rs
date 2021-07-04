@@ -3,9 +3,9 @@ mod proto;
 mod vault;
 
 use proto::{
-    Call, Connect, ConnectError, GameSession, GetInfo, Handshake, Init, MakeElem, MatchmakingQueue,
-    Move, Pdu, PlayerRegister, PlayerRegisterError, Protocol, Server, StartPosition,
-    StartPositions,
+    Connect, ConnectError, GameSession, GetInfo, Handshake, Init, MatchmakingQueue, Move, MoveCall,
+    Pdu, PlayerRegister, PlayerRegisterError, PlayersStates, Protocol, Server, StartPosition,
+    StartPositions, Update,
 };
 
 use board::{Board, Position};
@@ -22,7 +22,8 @@ use log::{debug, error, info};
 
 use std::{env, io::Error as IoError, net::SocketAddr, sync::Arc};
 
-use futures_channel::mpsc::unbounded;
+use futures::future::Either;
+use futures_channel::mpsc::{unbounded, UnboundedReceiver};
 use futures_util::{future, pin_mut, StreamExt};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -30,7 +31,9 @@ use anyhow::{Context, Result};
 
 use std::string::ToString;
 
+use crate::vault::WhoMove;
 use rand::{distributions::Alphanumeric, Rng};
+use tokio::sync::mpsc::UnboundedSender;
 
 type Vault = Arc<RwLock<vault::Vault>>;
 
@@ -229,8 +232,33 @@ async fn process_mm_heartbeat_check(vault: &Vault, addr: &SocketAddr) -> Result<
     Ok(())
 }
 
-async fn process_move_make(vault: &Vault, addr: &SocketAddr, make: &Vec<MakeElem>) -> Result<()> {
-    let now = tokio::time::Instant::now();
+async fn process_move_make(vault: &Vault, addr: &SocketAddr, mv: &Move) -> Result<()> {
+    match mv {
+        Move::Basic { .. }
+        | Move::Capture { .. }
+        | Move::Promotion { .. }
+        | Move::Castling { .. }
+        | Move::NoMove {}
+        | Move::Error(_) => (),
+    };
+
+    let lock = vault.write().await;
+    let peers_lock = lock.get_peers().await;
+    let peer = peers_lock
+        .get(addr)
+        .context(format!("get({}) from peer_map failed", addr))?;
+    let mut peer_lock = peer.lock().await;
+    match &peer_lock.state {
+        PeerState::Game { color, game } => {
+            let game_lock = game.lock().await;
+            game_lock.move_happen_signal.unbounded_send(Color::Red);
+        }
+        _ => (),
+    };
+
+    Ok(())
+
+    /*let now = tokio::time::Instant::now();
     let lock = vault.write().await;
     let peers_lock = lock.get_peers().await;
     let peer = peers_lock
@@ -240,22 +268,26 @@ async fn process_move_make(vault: &Vault, addr: &SocketAddr, make: &Vec<MakeElem
     if let PeerState::Game { color, game } = &mut peer_lock.state {
         let mut game_lock = game.lock().await;
         let player = game_lock.player_mut(&color);
-        if let PlayerState::TurnCallWait { since, timeout_dispatcher } = &player.state {
-            match game_lock.make_turn(make) {
+        if let PlayerState::MoveCallWait {
+            since,
+            timeout_dispatcher,
+        } = &player.state
+        {
+            /*match game_lock.make_turn(make) {
 
             }
             let turn_duration = now - *since;
             if turn_duration > PLAYER_TIME_2 {
                 player.time_remaining -= turn_duration - PLAYER_TIME_2;
             }
-            timeout_dispatcher.abort();
+            timeout_dispatcher.abort();*/
         }
 
         //peer_lock.state = PeerState::HeartbeatReady(Instant::now());
         //let mut hb_ready_lock = lock.get_hb_ready().await;
         //hb_ready_lock.insert(*addr, peer.clone());
     }
-    Ok(())
+    Ok(())*/
 }
 
 async fn process_msg(pdu: &Pdu, vault: &Vault, addr: &SocketAddr) -> Result<()> {
@@ -289,11 +321,8 @@ async fn process_msg(pdu: &Pdu, vault: &Vault, addr: &SocketAddr) -> Result<()> 
             _ => Ok(()),
         },
         Pdu::GameSession(gs) => match gs {
-            GameSession::Move(mv) => match mv {
-                Move::Make(make_vec) => process_move_make(vault, addr, make_vec).await,
-                Move::Call(_) => Ok(()),
-            },
-            GameSession::Lost { .. } | GameSession::Init(_) => Ok(()),
+            GameSession::Move(mv) => process_move_make(vault, addr, mv).await,
+            GameSession::Init(_) | GameSession::Update(_) => Ok(()),
         },
     }
 }
@@ -364,43 +393,82 @@ async fn handle_connection(vault: Vault, raw_stream: TcpStream, addr: SocketAddr
     vault.read().await.remove_peer(&addr).await;
 }
 
-async fn game_init_dispatch(vault: Vault, game_id: u64) -> Result<()> {
-    tokio::time::sleep(GS_INIT_PAUSE).await;
+async fn move_call_dispatch(
+    vault: Vault,
+    mut move_received: UnboundedReceiver<Color>,
+    game_id: u64,
+) -> Result<()> {
+    // after GS_INIT_PAUSE broadcast first update which invoke first player make his move
+    let mut player_time_remaining = Duration::from_secs(0);
+    {
+        tokio::time::sleep(GS_INIT_PAUSE).await;
 
-    let turn_color = Color::Red;
+        let first_move = Color::Red;
 
-    let call = Pdu::GameSession(proto::GameSession::Move(Move::Call(Call {
-        player: turn_color.to_string(),
-        timer: PLAYER_TIMER.as_secs(),
-        timer_2: PLAYER_TIME_2.as_secs(),
-    })))
-    .to_message()?;
+        let call = Pdu::GameSession(GameSession::Update(Update {
+            move_call: MoveCall {
+                player: first_move.to_string(),
+                timer: PLAYER_TIMER.as_secs(),
+                timer_2: PLAYER_TIME_2.as_secs(),
+            },
+            move_previous: Move::NoMove {},
+            players_states: PlayersStates {
+                red: proto::PlayerState::NoState {},
+                blue: proto::PlayerState::NoState {},
+                yellow: proto::PlayerState::NoState {},
+                green: proto::PlayerState::NoState {},
+            },
+        }))
+        .to_message()?;
 
-    let lock = vault.write().await;
-    let games_lock = lock.get_games().await;
-    let game = games_lock
-        .get(&game_id)
-        .context("game_session game lookup failed")?;
-    let mut game_lock = game.lock().await;
-    for player in game_lock.players_mut() {
-        if player.color == turn_color {
-            player.state = PlayerState::TurnCallWait {
-                since: tokio::time::Instant::now(),
-                timeout_dispatcher: tokio::spawn(player_timeout_dispatch(
-                    vault.clone(),
-                    game_id,
-                    turn_color.clone(),
-                    player.time_remaining + PLAYER_TIME_2,
-                )),
-            };
+        let lock = vault.write().await;
+        let games_lock = lock.get_games().await;
+        let game = games_lock
+            .get(&game_id)
+            .context("game_session game lookup failed")?;
+        let mut game_lock = game.lock().await;
+
+        game_lock.who_move = Some(WhoMove {
+            color: first_move,
+            since: tokio::time::Instant::now(),
+        });
+
+        for player in game_lock.players_mut() {
+            if player.color == Color::Red {
+                player_time_remaining = player.time_remaining
+            }
+            player.peer.lock().await.tx.unbounded_send(call.clone())?;
         }
-        player.peer.lock().await.tx.unbounded_send(call.clone())?;
+    }
+
+    loop {
+        let move_timeout = tokio::time::sleep(player_time_remaining + PLAYER_TIME_2);
+        pin_mut!(move_timeout);
+
+        // left move timeout, right receive move message
+        let branch = future::select(move_timeout, move_received.next()).await;
+
+        {
+            let lock = vault.write().await;
+            let games_lock = lock.get_games().await;
+            let game = games_lock
+                .get(&game_id)
+                .context("game_session game lookup failed")?;
+            let mut game_lock = game.lock().await;
+
+            // if player timeout
+            if let Either::Left(_) = branch {
+                let player = game_lock.current_move_player_mut();
+                //player
+            }
+        }
+        println!("{:?}", branch);
     }
 
     Ok(())
 }
 
-async fn player_timeout_dispatch(
+/*async fn move_call_dispatch(
     vault: Vault,
     game_id: u64,
     player_color: Color,
@@ -414,6 +482,7 @@ async fn player_timeout_dispatch(
         .get(&game_id)
         .context("game_session game lookup failed")?;
     let mut game_lock = game.lock().await;
+
     let players = game_lock.players_mut();
 
     let lost_pdu = Pdu::GameSession(proto::GameSession::Lost {
@@ -435,7 +504,7 @@ async fn player_timeout_dispatch(
             .unbounded_send(lost_pdu.clone())?;
     }
     Ok(())
-}
+}*/
 
 // Looping infinitely. On loop tick, if we find at least 4 MMQueue players, send HeartbeatCheck
 // Also, kick (send kick pdu and change state to Idle) players, who did not response on HeartbeatCheck
@@ -562,6 +631,8 @@ async fn matchmaking_dispatcher(vault: Vault) {
                         let yellow_reconnect_id = random_string();
                         let green_reconnect_id = random_string();
 
+                        let (sender, receiver) = unbounded();
+
                         let game = Arc::new(Mutex::new(Game {
                             id: game_id,
                             board: Board::new(),
@@ -569,30 +640,32 @@ async fn matchmaking_dispatcher(vault: Vault) {
                                 color: Color::Red,
                                 reconnect_id: red_reconnect_id.clone(),
                                 time_remaining: PLAYER_TIMER,
-                                state: PlayerState::Idle,
+                                state: PlayerState::NoState,
                                 peer: red.1.clone(),
                             },
                             blue: Player {
                                 color: Color::Blue,
                                 reconnect_id: blue_reconnect_id.clone(),
                                 time_remaining: PLAYER_TIMER,
-                                state: PlayerState::Idle,
+                                state: PlayerState::NoState,
                                 peer: blue.1.clone(),
                             },
                             yellow: Player {
                                 color: Color::Yellow,
                                 reconnect_id: yellow_reconnect_id.clone(),
                                 time_remaining: PLAYER_TIMER,
-                                state: PlayerState::Idle,
+                                state: PlayerState::NoState,
                                 peer: yellow.1.clone(),
                             },
                             green: Player {
                                 color: Color::Green,
                                 reconnect_id: green_reconnect_id.clone(),
                                 time_remaining: PLAYER_TIMER,
-                                state: PlayerState::Idle,
+                                state: PlayerState::NoState,
                                 peer: green.1.clone(),
                             },
+                            who_move: None,
+                            move_happen_signal: sender,
                         }));
 
                         games_lock.insert(game_id, game.clone());
@@ -674,7 +747,7 @@ async fn matchmaking_dispatcher(vault: Vault) {
                             }
                         }
 
-                        tokio::spawn(game_init_dispatch(vault.clone(), game_id));
+                        tokio::spawn(move_call_dispatch(vault.clone(), receiver, game_id));
 
                         game_id = game_id.wrapping_add(1);
                         tmp_peers.clear();
