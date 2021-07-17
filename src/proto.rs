@@ -1,7 +1,10 @@
 use crate::board::{Figure, Position};
+use crate::proto::MatchmakingQueue::PlayerKick;
+use crate::vault;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use tungstenite::protocol::Message;
+use tungstenite::stream::Mode::Plain;
 
 // Handshake //////////////////////////////////
 
@@ -126,14 +129,14 @@ pub enum Action {
     Capture(Position),
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "snake_case")]
 pub enum MoveError {
     ForbiddenMove { description: String },
     UnspecifiedError { description: String },
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "snake_case")]
 pub enum Move {
     Basic {
@@ -164,12 +167,21 @@ pub enum GameSession {
     Update(Update),
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "snake_case")]
-pub struct MoveCall {
-    pub player: String,
-    pub timer: u64,
-    pub timer_2: u64,
+pub enum MoveCall {
+    NoCall {},
+    Call {
+        player: String,
+        timer: u64,
+        timer_2: u64,
+    },
+}
+
+impl MoveCall {
+    pub fn is_no_call(&self) -> bool {
+        matches!(self, MoveCall::NoCall {})
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -183,10 +195,24 @@ pub enum RemainingPieces {
 #[serde(rename_all = "snake_case")]
 pub enum PlayerState {
     NoState {},
-    Check { from: Vec<Position> },
+    Check {},
     Checkmate {},
     Stalemate {},
-    Lose { remaining_pieces: RemainingPieces },
+    Lost { remaining_pieces: RemainingPieces },
+}
+
+impl From<vault::PlayerState> for PlayerState {
+    fn from(vault_state: vault::PlayerState) -> Self {
+        match vault_state {
+            vault::PlayerState::NoState => PlayerState::NoState {},
+            vault::PlayerState::Check => PlayerState::Check {},
+            vault::PlayerState::Checkmate => PlayerState::Checkmate {},
+            vault::PlayerState::Stalemate => PlayerState::Stalemate {},
+            vault::PlayerState::Lost => PlayerState::Lost {
+                remaining_pieces: RemainingPieces::Clear,
+            },
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]

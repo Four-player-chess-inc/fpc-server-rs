@@ -9,7 +9,7 @@ use proto::{
 };
 
 use board::{Board, Position};
-use vault::{ClientInfo, Color, Game, Peer, PeerState, Player, PlayerState};
+use vault::{ClientInfo, Color, Complete, Game, Peer, PeerState, Player, PlayerState};
 
 use tokio::sync::{Mutex, RwLock};
 use tokio::time::{self};
@@ -31,6 +31,7 @@ use anyhow::{Context, Result};
 
 use std::string::ToString;
 
+use crate::proto::MoveError;
 use crate::vault::WhoMove;
 use rand::{distributions::Alphanumeric, Rng};
 use tokio::sync::mpsc::UnboundedSender;
@@ -233,27 +234,42 @@ async fn process_mm_heartbeat_check(vault: &Vault, addr: &SocketAddr) -> Result<
 }
 
 async fn process_move_make(vault: &Vault, addr: &SocketAddr, mv: &Move) -> Result<()> {
+    let now = tokio::time::Instant::now();
+
+    let forbidden_move_pdu =
+        Pdu::GameSession(GameSession::Move(Move::Error(MoveError::ForbiddenMove {
+            description: "not allowed move".to_string(),
+        })))
+        .to_message()?;
+
     match mv {
         Move::Basic { .. }
         | Move::Capture { .. }
         | Move::Promotion { .. }
-        | Move::Castling { .. }
-        | Move::NoMove {}
-        | Move::Error(_) => (),
-    };
-
-    let lock = vault.write().await;
-    let peers_lock = lock.get_peers().await;
-    let peer = peers_lock
-        .get(addr)
-        .context(format!("get({}) from peer_map failed", addr))?;
-    let mut peer_lock = peer.lock().await;
-    match &peer_lock.state {
-        PeerState::Game { color, game } => {
-            let game_lock = game.lock().await;
-            game_lock.move_happen_signal.unbounded_send(Color::Red);
+        | Move::Castling { .. } => {
+            let lock = vault.write().await;
+            let peers_lock = lock.get_peers().await;
+            let peer = peers_lock
+                .get(addr)
+                .context(format!("get({}) from peer_map failed", addr))?;
+            let peer_lock = peer.lock().await;
+            match &peer_lock.state {
+                PeerState::Game { color, game } => {
+                    let mut game_lock = game.lock().await;
+                    if game_lock.validate_player_move(&mv, &color) {
+                        game_lock.who_move.as_mut().unwrap().complete = Some(Complete {
+                            mv: mv.clone(),
+                            at: now,
+                        });
+                        game_lock.move_happen_signal.unbounded_send(())?;
+                    } else {
+                        peer_lock.tx.unbounded_send(forbidden_move_pdu)?;
+                    }
+                }
+                _ => (),
+            };
         }
-        _ => (),
+        Move::NoMove {} | Move::Error(_) => (),
     };
 
     Ok(())
@@ -395,19 +411,27 @@ async fn handle_connection(vault: Vault, raw_stream: TcpStream, addr: SocketAddr
 
 async fn move_call_dispatch(
     vault: Vault,
-    mut move_received: UnboundedReceiver<Color>,
+    mut move_received: UnboundedReceiver<()>,
     game_id: u64,
 ) -> Result<()> {
-    // after GS_INIT_PAUSE broadcast first update which invoke first player make his move
     let mut player_time_remaining = Duration::from_secs(0);
+
+    // after GS_INIT_PAUSE broadcast first update
     {
         tokio::time::sleep(GS_INIT_PAUSE).await;
 
-        let first_move = Color::Red;
+        let lock = vault.write().await;
+        let games_lock = lock.get_games().await;
+        let game = games_lock
+            .get(&game_id)
+            .context("game_session game lookup failed")?;
+        let mut game_lock = game.lock().await;
+
+        let first_moved_player = game_lock.next_moved_player_mut().unwrap();
 
         let call = Pdu::GameSession(GameSession::Update(Update {
-            move_call: MoveCall {
-                player: first_move.to_string(),
+            move_call: MoveCall::Call {
+                player: first_moved_player.color.clone().to_string(),
                 timer: PLAYER_TIMER.as_secs(),
                 timer_2: PLAYER_TIME_2.as_secs(),
             },
@@ -421,33 +445,24 @@ async fn move_call_dispatch(
         }))
         .to_message()?;
 
-        let lock = vault.write().await;
-        let games_lock = lock.get_games().await;
-        let game = games_lock
-            .get(&game_id)
-            .context("game_session game lookup failed")?;
-        let mut game_lock = game.lock().await;
+        player_time_remaining = first_moved_player.time_remaining;
 
         game_lock.who_move = Some(WhoMove {
-            color: first_move,
+            color: first_moved_player.color.clone(),
             since: tokio::time::Instant::now(),
+            complete: None,
         });
 
-        for player in game_lock.players_mut() {
-            if player.color == Color::Red {
-                player_time_remaining = player.time_remaining
-            }
-            player.peer.lock().await.tx.unbounded_send(call.clone())?;
-        }
+        game_lock.broadcast(call).await;
     }
 
+    // Process player move and timeout
     loop {
         let move_timeout = tokio::time::sleep(player_time_remaining + PLAYER_TIME_2);
         pin_mut!(move_timeout);
 
         // left move timeout, right receive move message
         let branch = future::select(move_timeout, move_received.next()).await;
-
         {
             let lock = vault.write().await;
             let games_lock = lock.get_games().await;
@@ -456,13 +471,121 @@ async fn move_call_dispatch(
                 .context("game_session game lookup failed")?;
             let mut game_lock = game.lock().await;
 
-            // if player timeout
-            if let Either::Left(_) = branch {
-                let player = game_lock.current_move_player_mut();
-                //player
+            let mut move_previous = Move::NoMove {};
+            match branch {
+                // when timeout
+                Either::Left(_) => {
+                    //let who_move = game_lock.who_move.as_ref().unwrap();
+                    //let color = game_lock.who_move.as_ref().unwrap().color.clone();
+                    /* This block prevent situation when
+                    process_move_make receive move message
+                    process_move_make lock game mutex
+                    process_move_make send message over channel
+                    move_call_dispatch select move_timeout
+                    move_call_dispatch wait lock game mutex
+                    process_move_make release lock
+                    move_call_dispatch lock game mutex
+                    move_call_dispatch loop to next iteration
+                        and get move_received from past turn */
+                    if game_lock.who_move.as_ref().unwrap().complete.is_some() {
+                        move_received.next().await;
+                        let mv = game_lock
+                            .who_move
+                            .as_ref()
+                            .unwrap()
+                            .complete
+                            .as_ref()
+                            .unwrap()
+                            .mv
+                            .clone();
+                        game_lock.apply_move(&mv);
+                        move_previous = mv;
+                        //TODO: process move
+                    } else {
+                        let player = game_lock.current_move_player_mut().unwrap();
+                        player.state = PlayerState::Lost;
+                        player.time_remaining = Duration::from_secs(0);
+                    }
+                }
+                // when move received
+                Either::Right(_) => {
+                    let mv = game_lock
+                        .who_move
+                        .as_ref()
+                        .unwrap()
+                        .complete
+                        .as_ref()
+                        .unwrap()
+                        .mv
+                        .clone();
+                    game_lock.apply_move(&mv);
+                    move_previous = mv;
+                }
+            }
+
+            let mut move_call = MoveCall::NoCall {};
+
+            // find first no lost state player
+            // if he checknmate or stalemate, lost him
+            while let Some(player) = game_lock.next_moved_player_mut() {
+                match player.state {
+                    PlayerState::Checkmate | PlayerState::Stalemate | PlayerState::Lost => {
+                        player.state = PlayerState::Lost
+                    }
+
+                    PlayerState::NoState | PlayerState::Check => {
+                        player_time_remaining = player.time_remaining;
+                        move_call = MoveCall::Call {
+                            player: player.color.clone().to_string(),
+                            timer: player.time_remaining.as_secs(),
+                            timer_2: PLAYER_TIME_2.as_secs(),
+                        };
+                        game_lock.who_move = Some(WhoMove {
+                            color: player.color.clone(),
+                            since: tokio::time::Instant::now(),
+                            complete: None,
+                        });
+                        break;
+                    }
+                }
+            }
+
+            let players_states = PlayersStates {
+                red: game_lock.player(&Color::Red).state.clone().into(),
+                blue: game_lock.player(&Color::Blue).state.clone().into(),
+                yellow: game_lock.player(&Color::Yellow).state.clone().into(),
+                green: game_lock.player(&Color::Green).state.clone().into(),
+            };
+
+            let update = Pdu::GameSession(GameSession::Update(Update {
+                move_call: move_call.clone(),
+                move_previous,
+                players_states,
+            }))
+            .to_message()?;
+
+            game_lock.broadcast(update).await?;
+
+            if move_call.is_no_call() {
+                game_lock.who_move = None;
+                break;
             }
         }
-        println!("{:?}", branch);
+
+        /*if game_lock.next_moved_player_mut().is_none() {
+            break;
+        }*/
+
+        // if player timeout
+        /*if let Either::Right(b) = branch {
+            let b = b.clone();
+            move_received.close();
+            let player = game_lock.current_move_player_mut();
+            println!("{:?}", b);
+            //player
+        }*/
+
+        //println!("{:?}", branch);
     }
 
     Ok(())
