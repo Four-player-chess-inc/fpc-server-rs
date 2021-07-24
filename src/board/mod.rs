@@ -12,7 +12,7 @@ use std::convert::TryFrom;
     piece:
 }*/
 
-#[derive(Clone, Serialize, Deserialize, Debug)]
+#[derive(Clone, Copy, Serialize, Deserialize, Debug)]
 pub enum Figure {
     Pawn,
     Bishop,
@@ -23,7 +23,7 @@ pub enum Figure {
 }
 
 #[derive(Clone)]
-pub enum StartLine {
+pub enum Line {
     Column(Column),
     Row(Row),
 }
@@ -35,10 +35,18 @@ pub struct Piece {
     // need for king rook castling
     have_not_move_yet: bool,
     // need for pawn direction determine
-    pub start_line: StartLine,
+    pub start_line: Line,
 }
 
 impl Piece {
+    pub fn new(figure: Figure, color: Color, start_line: Line) -> Piece {
+        Piece {
+            figure,
+            color,
+            start_line,
+            have_not_move_yet: true,
+        }
+    }
     pub fn already_move(&self) -> bool {
         return !self.have_not_move_yet;
     }
@@ -84,97 +92,72 @@ pub struct Board {
 
 impl Board {
     pub fn new() -> Board {
-        let mut figures = HashMap::new();
-        figures.insert(3, Figure::Rook);
-        figures.insert(4, Figure::Knight);
-        figures.insert(5, Figure::Bishop);
-        figures.insert(6, Figure::Queen);
-        figures.insert(7, Figure::King);
-        figures.insert(8, Figure::Bishop);
-        figures.insert(9, Figure::Knight);
-        figures.insert(10, Figure::Rook);
+        let figure_seq = [
+            Figure::Rook,
+            Figure::Knight,
+            Figure::Bishop,
+            Figure::Queen,
+            Figure::King,
+            Figure::Bishop,
+            Figure::Knight,
+            Figure::Rook,
+        ];
+
+        let mut figure_seq_reversed = figure_seq;
+        figure_seq_reversed.reverse();
 
         let mut cells = HashMap::new();
 
         for position in Position::into_enum_iter() {
-            let mut cell_content = CellContent::Empty;
+            let position_col_row = (position.column(), position.row());
 
-            if position.row() == Row::R2 {
-                cell_content = CellContent::Piece(Piece {
-                    figure: Figure::Pawn,
-                    color: Color::Red,
-                    have_not_move_yet: true,
-                    start_line: StartLine::Row(Row::R2),
-                });
-            } else if position.column() == Column::b {
-                cell_content = CellContent::Piece(Piece {
-                    figure: Figure::Pawn,
-                    color: Color::Blue,
-                    have_not_move_yet: true,
-                    start_line: StartLine::Column(Column::b),
-                });
-            } else if position.row() == Row::R13 {
-                cell_content = CellContent::Piece(Piece {
-                    figure: Figure::Pawn,
-                    color: Color::Yellow,
-                    have_not_move_yet: true,
-                    start_line: StartLine::Row(Row::R13),
-                });
-            } else if position.column() == Column::m {
-                cell_content = CellContent::Piece(Piece {
-                    figure: Figure::Pawn,
-                    color: Color::Green,
-                    have_not_move_yet: true,
-                    start_line: StartLine::Column(Column::m),
-                });
-            } else if position.row() == Row::R1 {
-                let col_idx = position.column().get_index();
-                if let Some(figure) = figures.get(&col_idx) {
-                    cell_content = CellContent::Piece(Piece {
-                        figure: (*figure).clone(),
-                        color: Color::Red,
-                        have_not_move_yet: true,
-                        start_line: StartLine::Row(Row::R1),
-                    });
+            let cell_content = match position_col_row {
+                (_, Row::R2) => {
+                    CellContent::Piece(Piece::new(Figure::Pawn, Color::Red, Line::Row(Row::R2)))
                 }
-            } else if position.column() == Column::a {
-                let row_idx = position.row().get_index();
-                if let Some(figure) = figures.get(&row_idx) {
-                    cell_content = CellContent::Piece(Piece {
-                        figure: (*figure).clone(),
-                        color: Color::Blue,
-                        have_not_move_yet: true,
-                        start_line: StartLine::Column(Column::a),
-                    });
+                (Column::b, _) => CellContent::Piece(Piece::new(
+                    Figure::Pawn,
+                    Color::Blue,
+                    Line::Column(Column::b),
+                )),
+                (_, Row::R13) => {
+                    CellContent::Piece(Piece::new(Figure::Pawn, Color::Yellow, Line::Row(Row::R13)))
                 }
-            } else if position.row() == Row::R14 {
-                let col_idx = position.column().get_index();
-                if let Some(figure) = figures.get(&col_idx) {
-                    cell_content = CellContent::Piece(Piece {
-                        figure: (*figure).clone(),
-                        color: Color::Yellow,
-                        have_not_move_yet: true,
-                        start_line: StartLine::Row(Row::R14),
-                    });
+                (Column::m, _) => CellContent::Piece(Piece::new(
+                    Figure::Pawn,
+                    Color::Green,
+                    Line::Column(Column::m),
+                )),
+                (col, Row::R1) => {
+                    let figure = figure_seq.get((col.get_index() - 3) as usize).unwrap();
+                    CellContent::Piece(Piece::new(*figure, Color::Red, Line::Row(Row::R1)))
                 }
-            } else if position.column() == Column::n {
-                let row_idx = position.row().get_index();
-                if let Some(figure) = figures.get(&row_idx) {
-                    cell_content = CellContent::Piece(Piece {
-                        figure: (*figure).clone(),
-                        color: Color::Green,
-                        have_not_move_yet: true,
-                        start_line: StartLine::Column(Column::n),
-                    });
+                (Column::a, row) => {
+                    let figure = figure_seq.get((row.get_index() - 3) as usize).unwrap();
+                    CellContent::Piece(Piece::new(*figure, Color::Blue, Line::Column(Column::a)))
                 }
-            }
+                (col, Row::R14) => {
+                    let figure = figure_seq_reversed
+                        .get((col.get_index() - 3) as usize)
+                        .unwrap();
+                    CellContent::Piece(Piece::new(*figure, Color::Yellow, Line::Row(Row::R14)))
+                }
+                (Column::n, row) => {
+                    let figure = figure_seq_reversed
+                        .get((row.get_index() - 3) as usize)
+                        .unwrap();
+                    CellContent::Piece(Piece::new(*figure, Color::Green, Line::Column(Column::n)))
+                }
+                (_) => CellContent::Empty,
+            };
+
             let cell = Cell {
                 position: position.clone(),
                 content: cell_content,
             };
             cells.insert(position, cell);
         }
-        Board { cells }
+        return Board { cells };
     }
 
     pub fn cell(&self, pos: &Position) -> &Cell {
@@ -225,7 +208,7 @@ impl Board {
                         Figure::Pawn => {
                             if distance == 0 {
                                 match &attacker_piece.start_line {
-                                    StartLine::Column(attacker_starting_col) => {
+                                    Line::Column(attacker_starting_col) => {
                                         if attacker_starting_col.get_index() == 1 {
                                             if attacker_pos.column().get_index()
                                                 < target_pos.column().get_index()
@@ -240,7 +223,7 @@ impl Board {
                                             }
                                         }
                                     }
-                                    StartLine::Row(attacker_starting_row) => {
+                                    Line::Row(attacker_starting_row) => {
                                         if attacker_starting_row.get_index() == 1 {
                                             if attacker_pos.row().get_index()
                                                 < target_pos.row().get_index()

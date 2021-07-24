@@ -1,4 +1,4 @@
-use crate::board::{Board, CellContent, Column, Figure, Position, Row, StartLine};
+use crate::board::{Board, CellContent, Column, Figure, Line, Position, Row};
 use crate::proto::{Move, MoveError};
 use anyhow::Result;
 use futures::channel::mpsc::UnboundedSender;
@@ -261,68 +261,34 @@ impl Game {
         Ok(())
     }
     fn apply_castling(&mut self, rook_pos: &Position) -> Result<(), MoveError> {
-        let mut cells_between_rook_and_king = Vec::new();
-        let mut king_path = Vec::new();
+        //let mut cells_between_rook_and_king = Vec::new();
+        //let mut king_path = Vec::new();
+
+        //king_path = vec![Position::g1, Position::f1];
+        //cells_between_rook_and_king = vec![Position::g1, Position::f1, Position::e1];
+        let mut king_pos = Position::h1;
+        match rook_pos {
+            Position::d1 | Position::k1 => king_pos = Position::h1,
+            Position::a4 | Position::a11 => king_pos = Position::a8,
+            Position::d14 | Position::k14 => king_pos = Position::g14,
+            Position::n4 | Position::n11 => king_pos = Position::n7,
+            _ => return Err(MoveError::ForbiddenMove {
+                description: "wrong rook position".to_string(),
+            })
+        }
+
+        let rook_col_idx = rook_pos.column().get_index();
+        let rook_row_idx = rook_pos.row().get_index();
+        let king_col_idx = king_pos.column().get_index();
+        let king_row_idx = king_pos.row().get_index();
+
+        7..5;
+        //for king_line_idx..rook_line_idx {
+//
+       // }
+
 
         let rook_cell = self.board.cell(&rook_pos);
-
-        match rook_cell.as_ref().unwrap().start_line {
-            StartLine::Row(rook_row) => {
-                //let roo_col
-                //let rook_col_idx = rook_cell.position.column().get_index();
-
-                /*let rook_col = rook_cell.position.column();
-                for _ in 0..2 {
-                    king_path.push(
-                        Position::try_from((
-                            king_col_idx + king_col_idx_inc,
-                            king_row_idx + king_row_idx_inc,
-                        ))
-                        .unwrap(),
-                    );
-                    cells_between_rook_and_king.push(
-                        Position::try_from((
-                            king_col_idx + king_col_idx_inc,
-                            king_row_idx + king_row_idx_inc,
-                        ))
-                        .unwrap(),
-                    );
-                }*/
-
-                //let rook_row_idx = rook_cell.position.row().get_index();
-                //let king_pos = Position::try_from()
-                //king_path = []
-            }
-            StartLine::Column(rook_col) => {
-                //let king_col_idx = Column::
-            }
-        }
-
-        match rook_pos {
-            Position::d1 | Position::a4 | Position::d14 | Position::n4 => {
-                match rook_cell.as_ref().unwrap().start_line {
-                    StartLine::Row(_) => {
-                        //let rook_col_idx = rook_cell.position.column().get_index();
-                        let rook_row_idx = rook_cell.position.row().get_index();
-                        //let king_pos = Position::try_from()
-                        //king_path = []
-                    }
-                    StartLine::Column(_) => {}
-                }
-                cells_between_rook_and_king = vec![Position::e1, Position::f1, Position::g1];
-                king_path = vec![Position::g1, Position::f1];
-            }
-            Position::k1 | Position::a11 | Position::k14 | Position::n11 => {
-                cells_between_rook_and_king = vec![Position::i1, Position::j1];
-                king_path = vec![Position::i1, Position::j1];
-            }
-            _ => {
-                return Err(MoveError::ForbiddenMove {
-                    description: "wrong rook position".to_string(),
-                })
-            }
-        }
-
         let king_cell = self.board.cell(&Position::h1);
 
         if rook_cell.is_empty() {
@@ -391,40 +357,7 @@ impl Game {
             Move::Basic { from, to } => {}
             Move::Capture { from, to } => {}
             Move::Castling { rook } => {
-                let rook_cell = self.board.cell(&rook);
-                if rook_cell.have_not_move_yet() {
-                    match rook {
-                        Position::d1 => {
-                            let king_cell = self.board.cell(&Position::h1);
-                            if king_cell.have_not_move_yet() {
-                                let cells_between_rook_and_king =
-                                    [Position::e1, Position::f1, Position::g1];
-                                if cells_between_rook_and_king
-                                    .iter()
-                                    .all(|p| self.board.cell(&p).is_empty())
-                                {
-                                    let current_move_player = self.current_move_player().unwrap();
-                                    if current_move_player.state != PlayerState::Check {
-                                        let g1 = self.board.cell_under_attack_from(&Position::g1);
-                                        let f1 = self.board.cell_under_attack_from(&Position::f1);
-                                        let non_our_attackers =
-                                            g1.iter().chain(f1.iter()).filter(|c| {
-                                                if let CellContent::Piece(piece) = &c.content {
-                                                    if piece.color == current_move_player.color {
-                                                        return false;
-                                                    }
-                                                }
-                                                true
-                                            });
-                                        if non_our_attackers.count() == 0 {}
-                                    }
-                                }
-                            }
-                        }
-                        Position::k1 => (),
-                        _ => (),
-                    }
-                }
+                    return self.apply_castling(rook);
             }
             Move::Promotion { from, to, into } => {}
             Move::NoMove {} | Move::Error(_) => (),
