@@ -1,6 +1,6 @@
-use crate::board::{Board, CellContent, Column, Figure, Line, Position, Row};
+use crate::board::{Board, CellContent, Column, Figure, Line, Position, Row, CASTLING_PATTERNS};
 use crate::proto::{Move, MoveError};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use futures::channel::mpsc::UnboundedSender;
 use std::collections::HashMap;
 use std::convert::TryFrom;
@@ -81,7 +81,7 @@ pub struct Vault {
     reconnect: Mutex<ReconnectMap>,
 }
 
-#[derive(PartialEq, Clone, Debug)]
+#[derive(PartialEq, Clone, Copy, Debug)]
 pub enum Color {
     Red,
     Green,
@@ -241,14 +241,17 @@ impl Game {
         }
         Ok(())
     }
+
     pub fn current_move_player(&self) -> Option<&Player> {
         let color = self.who_move.as_ref()?.color.clone();
         Some(self.player(&color))
     }
+
     pub fn current_move_player_mut(&mut self) -> Option<&mut Player> {
         let color = self.who_move.as_ref()?.color.clone();
         Some(self.player_mut(&color))
     }
+
     pub fn validate_player_move(&self, mv: &Move, color: &Color) -> bool {
         if let Some(wm) = &self.who_move {
             if wm.color == *color {
@@ -257,68 +260,47 @@ impl Game {
         }
         false
     }
+
     pub fn validate_move(&self, mv: &Move) -> Result<(), MoveError> {
         Ok(())
     }
-    fn apply_castling(&mut self, rook_pos: &Position) -> Result<(), MoveError> {
-        //let mut cells_between_rook_and_king = Vec::new();
-        //let mut king_path = Vec::new();
 
-        //king_path = vec![Position::g1, Position::f1];
-        //cells_between_rook_and_king = vec![Position::g1, Position::f1, Position::e1];
-        let mut king_pos = Position::h1;
-        match rook_pos {
-            Position::d1 | Position::k1 => king_pos = Position::h1,
-            Position::a4 | Position::a11 => king_pos = Position::a8,
-            Position::d14 | Position::k14 => king_pos = Position::g14,
-            Position::n4 | Position::n11 => king_pos = Position::n7,
-            _ => return Err(MoveError::ForbiddenMove {
-                description: "wrong rook position".to_string(),
-            })
-        }
-
-        let rook_col_idx = rook_pos.column().get_index();
-        let rook_row_idx = rook_pos.row().get_index();
-        let king_col_idx = king_pos.column().get_index();
-        let king_row_idx = king_pos.row().get_index();
-
-        7..5;
-        //for king_line_idx..rook_line_idx {
-//
-       // }
-
-
-        let rook_cell = self.board.cell(&rook_pos);
-        let king_cell = self.board.cell(&Position::h1);
-
-        if rook_cell.is_empty() {
+    fn apply_castling(&mut self, rook_pos: Position) -> Result<(), MoveError> {
+        let rook = self.board.piece(rook_pos);
+        if rook.is_none() {
             return Err(MoveError::ForbiddenMove {
                 description: "empty rook cell".to_string(),
             });
         }
-        if king_cell.is_empty() {
+
+        let rook = rook.unwrap();
+        if rook.already_move() {
+            return Err(MoveError::ForbiddenMove {
+                description: "rook already move".to_string(),
+            });
+        }
+
+        let king = self.board.find_king(rook.color);
+        if king.is_none() {
             return Err(MoveError::ForbiddenMove {
                 description: "empty king cell".to_string(),
             });
         }
 
-        if rook_cell.as_ref().unwrap().already_move() {
-            return Err(MoveError::ForbiddenMove {
-                description: "rook already move".to_string(),
-            });
-        }
-        if king_cell.as_ref().unwrap().already_move() {
+        let (king_pos, king) = king.unwrap().position_piece();
+        if king.already_move() {
             return Err(MoveError::ForbiddenMove {
                 description: "king already move".to_string(),
             });
         }
 
-        #[rustfmt::skip]
-            let cells_between_rook_and_king_empty =
-            [Position::e1, Position::f1, Position::g1]
-                .iter().all(|p| self.board.cell(&p).is_empty());
+        let castling_pattern = CASTLING_PATTERNS.get(&(rook_pos, king_pos)).unwrap();
 
-        if !cells_between_rook_and_king_empty {
+        if castling_pattern
+            .space_between
+            .iter()
+            .any(|pos| self.board.piece(*pos).is_some())
+        {
             return Err(MoveError::ForbiddenMove {
                 description: "cells between rook and king not empty".to_string(),
             });
@@ -331,33 +313,41 @@ impl Game {
             });
         }
 
-        let g1_attackers = self.board.cell_under_attack_from(&Position::g1);
-        let f1_attackers = self.board.cell_under_attack_from(&Position::f1);
-        let g1_f1_attackers_except_our =
-            g1_attackers.iter().chain(f1_attackers.iter()).filter(|c| {
-                if let CellContent::Piece(piece) = &c.content {
-                    if piece.color == current_move_player.color {
-                        return false;
-                    }
+        let king_path_attackers = castling_pattern
+            .king_path
+            .iter()
+            .map(|path_pos| self.board.attackers_on_position(*path_pos))
+            .flatten()
+            .filter(|attacker| {
+                if attacker.color == current_move_player.color {
+                    return false;
                 }
                 true
             });
 
-        if g1_f1_attackers_except_our.count() > 0 {
+        if king_path_attackers.count() > 0 {
             return Err(MoveError::ForbiddenMove {
                 description: "king castling path is under attack".to_string(),
             });
         }
 
+        self.board.piece_move(rook_pos, castling_pattern.rook_end_pos);
+        self.board.piece_move(rook_pos, castling_pattern.rook_end_pos);
+        Ok(())
+    }
+
+    fn apply_capture(&self, from: Position, to: Position) -> Result<(), MoveError> {
         Ok(())
     }
 
     pub fn apply_move(&mut self, mv: &Move) -> Result<(), MoveError> {
         match mv {
             Move::Basic { from, to } => {}
-            Move::Capture { from, to } => {}
+            Move::Capture { from, to } => {
+                return self.apply_capture(*from, *to);
+            }
             Move::Castling { rook } => {
-                    return self.apply_castling(rook);
+                return self.apply_castling(*rook);
             }
             Move::Promotion { from, to, into } => {}
             Move::NoMove {} | Move::Error(_) => (),

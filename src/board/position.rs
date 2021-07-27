@@ -175,7 +175,7 @@ impl Index<usize> for Column {
     }
 }*/
 
-#[derive(Debug, Clone, Serialize, Deserialize, IntoEnumIterator, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, IntoEnumIterator, PartialEq, Eq, Hash)]
 #[allow(non_camel_case_types)]
 pub enum Position {
     a4,
@@ -668,6 +668,43 @@ impl Position {
             Position::n10 => Row::R10,
             Position::n11 => Row::R11,
         }
+    }
+    pub fn col_row(&self) -> (Row, Column) {
+        (self.row(), self.column())
+    }
+    pub fn col_row_idx(&self) -> (isize, isize) {
+        (self.row().get_index(), self.column().get_index())
+    }
+    pub fn line_between(pos_one: Position, pos_two: Position) -> Result<Vec<Position>, ()> {
+        let (pos_one_col, pos_one_row) = pos_one.col_row_idx();
+        let (pos_two_col, pos_two_row) = pos_two.col_row_idx();
+
+        if pos_one_col == pos_two_col {
+            return if pos_one_row < pos_two_row {
+                Ok((pos_one_row..pos_two_row)
+                    .skip(1)
+                    .map(|r| Position::try_from((pos_one_col, r)).unwrap())
+                    .collect::<Vec<_>>())
+            } else {
+                Ok((pos_two_row..pos_one_row)
+                    .skip(1)
+                    .map(|r| Position::try_from((pos_one_col, r)).unwrap())
+                    .collect::<Vec<_>>())
+            };
+        } else if pos_one_row == pos_two_row {
+            return if pos_one_col < pos_two_col {
+                Ok((pos_one_col..pos_two_col)
+                    .skip(1)
+                    .map(|c| Position::try_from((c, pos_one_row)).unwrap())
+                    .collect::<Vec<_>>())
+            } else {
+                Ok((pos_two_col..pos_one_col)
+                    .skip(1)
+                    .map(|c| Position::try_from((c, pos_one_row)).unwrap())
+                    .collect::<Vec<_>>())
+            };
+        }
+        Err(())
     }
 }
 
