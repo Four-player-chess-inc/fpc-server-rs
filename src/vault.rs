@@ -1,4 +1,4 @@
-use crate::board::{Board, CellContent, Column, Figure, Line, Position, Row, CASTLING_PATTERNS};
+use crate::board::{Board, Column, Figure, Line, Position, Row, CASTLING_PATTERNS};
 use crate::proto::{Move, MoveError};
 use anyhow::{Context, Result};
 use futures::channel::mpsc::UnboundedSender;
@@ -287,7 +287,7 @@ impl Game {
             });
         }
 
-        let (king_pos, king) = king.unwrap().position_piece();
+        let (king, king_pos) = king.unwrap().piece_pos();
         if king.already_move() {
             return Err(MoveError::ForbiddenMove {
                 description: "king already move".to_string(),
@@ -317,13 +317,10 @@ impl Game {
             .king_path
             .iter()
             .map(|path_pos| self.board.attackers_on_position(*path_pos))
+            .filter(|attackers| attackers.is_some())
+            .map(|attackers| attackers.unwrap())
             .flatten()
-            .filter(|attacker| {
-                if attacker.color == current_move_player.color {
-                    return false;
-                }
-                true
-            });
+            .filter(|attacker| attacker.piece().color != current_move_player.color);
 
         if king_path_attackers.count() > 0 {
             return Err(MoveError::ForbiddenMove {
@@ -331,8 +328,10 @@ impl Game {
             });
         }
 
-        self.board.piece_move(rook_pos, castling_pattern.rook_end_pos);
-        self.board.piece_move(rook_pos, castling_pattern.rook_end_pos);
+        self.board
+            .piece_move(rook_pos, castling_pattern.rook_end_pos);
+        self.board
+            .piece_move(rook_pos, castling_pattern.rook_end_pos);
         Ok(())
     }
 

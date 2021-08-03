@@ -38,7 +38,7 @@ pub static CASTLING_PATTERNS: Lazy<HashMap<(Position, Position), CastlingPattern
                 space_between: vec![Position::i1, Position::j1],
                 king_path: vec![Position::i1, Position::j1],
                 rook_end_pos: Position::i1,
-                king_end_pos : Position::j1,
+                king_end_pos: Position::j1,
             },
         );
         m.insert(
@@ -47,7 +47,7 @@ pub static CASTLING_PATTERNS: Lazy<HashMap<(Position, Position), CastlingPattern
                 space_between: vec![Position::a10, Position::a9],
                 king_path: vec![Position::a9, Position::a10],
                 rook_end_pos: Position::a9,
-                king_end_pos : Position::a10,
+                king_end_pos: Position::a10,
             },
         );
         m.insert(
@@ -56,7 +56,7 @@ pub static CASTLING_PATTERNS: Lazy<HashMap<(Position, Position), CastlingPattern
                 space_between: vec![Position::a5, Position::a6, Position::a7],
                 king_path: vec![Position::a7, Position::a6],
                 rook_end_pos: Position::a7,
-                king_end_pos : Position::a6,
+                king_end_pos: Position::a6,
             },
         );
         m.insert(
@@ -74,7 +74,7 @@ pub static CASTLING_PATTERNS: Lazy<HashMap<(Position, Position), CastlingPattern
                 space_between: vec![Position::e14, Position::f14],
                 king_path: vec![Position::f14, Position::e14],
                 rook_end_pos: Position::f14,
-                king_end_pos : Position::e14,
+                king_end_pos: Position::e14,
             },
         );
         m.insert(
@@ -83,7 +83,7 @@ pub static CASTLING_PATTERNS: Lazy<HashMap<(Position, Position), CastlingPattern
                 space_between: vec![Position::n5, Position::n6],
                 king_path: vec![Position::n6, Position::n5],
                 rook_end_pos: Position::n6,
-                king_end_pos : Position::n5,
+                king_end_pos: Position::n5,
             },
         );
         m.insert(
@@ -92,7 +92,7 @@ pub static CASTLING_PATTERNS: Lazy<HashMap<(Position, Position), CastlingPattern
                 space_between: vec![Position::n10, Position::n9, Position::n8],
                 king_path: vec![Position::n8, Position::n9],
                 rook_end_pos: Position::n8,
-                king_end_pos : Position::n9,
+                king_end_pos: Position::n9,
             },
         );
         m
@@ -144,39 +144,28 @@ impl Piece {
     }
 }
 
-pub enum CellContent {
-    Empty,
-    Piece(Piece),
+pub enum CheckMate {
+    No,
+    Check,
+    Checkmate,
 }
 
-/*pub struct Cell<'a> {
-    board: &'a Board,
-    position: Position,
+struct Restore {
+    from: CellPos,
+    to: CellPos,
 }
-
-impl Cell {
-    pub fn is_piece(&self, fig: &Figure) -> bool {
-        matches!(self.piece(), Some(_))
-    }
-    pub fn is_empty(&self) -> bool {
-        matches!(self.piece(), None)
-    }
-    /*pub fn have_not_move_yet(&self) -> bool {
-        return match &self.content {
-            CellContent::Piece(p) => p.have_not_move_yet,
-            CellContent::Empty => false,
-        };
-    }*/
-    pub fn piece(&self) -> Option<&Piece> {
-        self.board.pieces.get(&self.position)
-    }
-}*/
 
 pub struct Board {
     pieces: HashMap<Position, Piece>,
+    restore: Option<Restore>,
 }
 
-impl Board {
+struct RawMove {
+    from: Position,
+    to: Position,
+}
+
+impl<'a> Board {
     pub fn new() -> Board {
         let figure_seq = [
             Figure::Rook,
@@ -249,21 +238,17 @@ impl Board {
                 _ => None,
             };
         }
-        return Board { pieces };
+        return Board {
+            pieces,
+            restore: None,
+        };
     }
-
-    /*pub fn cell(&self, pos: Position) -> Cell {
-        Cell {
-            board: &self,
-            position: pos,
-        }
-    }*/
 
     pub fn piece(&self, pos: Position) -> Option<&Piece> {
         self.pieces.get(&pos)
     }
 
-    pub fn attackers_on_position(&self, target_pos: Position) -> Vec<&Piece> {
+    pub fn attackers_on_position(&self, target_pos: Position) -> Option<Vec<PiecePos>> {
         let mut attackers = Vec::new();
 
         let row_idx = target_pos.row().get_index();
@@ -285,7 +270,10 @@ impl Board {
             {
                 if let Some(attacker_piece) = self.piece(attacker_pos) {
                     if attacker_piece.figure == Figure::Knight {
-                        attackers.push(attacker_piece);
+                        attackers.push(PiecePos {
+                            position: attacker_pos,
+                            piece: attacker_piece,
+                        });
                     }
                 }
             }
@@ -300,7 +288,10 @@ impl Board {
                     match attacker_piece.figure {
                         Figure::Rook | Figure::Knight => break,
                         Figure::Queen | Figure::Bishop => {
-                            attackers.push(attacker_piece);
+                            attackers.push(PiecePos {
+                                position: attacker_pos,
+                                piece: attacker_piece,
+                            });
                             break;
                         }
                         Figure::Pawn => {
@@ -311,13 +302,19 @@ impl Board {
                                             if attacker_pos.column().get_index()
                                                 < target_pos.column().get_index()
                                             {
-                                                attackers.push(attacker_piece);
+                                                attackers.push(PiecePos {
+                                                    position: attacker_pos,
+                                                    piece: attacker_piece,
+                                                });
                                             }
                                         } else {
                                             if attacker_pos.column().get_index()
                                                 > target_pos.column().get_index()
                                             {
-                                                attackers.push(attacker_piece);
+                                                attackers.push(PiecePos {
+                                                    position: attacker_pos,
+                                                    piece: attacker_piece,
+                                                });
                                             }
                                         }
                                     }
@@ -326,13 +323,19 @@ impl Board {
                                             if attacker_pos.row().get_index()
                                                 < target_pos.row().get_index()
                                             {
-                                                attackers.push(attacker_piece);
+                                                attackers.push(PiecePos {
+                                                    position: attacker_pos,
+                                                    piece: attacker_piece,
+                                                });
                                             }
                                         } else {
                                             if attacker_pos.row().get_index()
                                                 > target_pos.row().get_index()
                                             {
-                                                attackers.push(attacker_piece);
+                                                attackers.push(PiecePos {
+                                                    position: attacker_pos,
+                                                    piece: attacker_piece,
+                                                });
                                             }
                                         }
                                     }
@@ -342,7 +345,10 @@ impl Board {
                         }
                         Figure::King => {
                             if distance == 0 {
-                                attackers.push(attacker_piece);
+                                attackers.push(PiecePos {
+                                    position: attacker_pos,
+                                    piece: attacker_piece,
+                                });
                             }
                             break;
                         }
@@ -361,12 +367,18 @@ impl Board {
                     match attacker_piece.figure {
                         Figure::Pawn | Figure::Knight | Figure::Bishop => break,
                         Figure::Queen | Figure::Rook => {
-                            attackers.push(attacker_piece);
+                            attackers.push(PiecePos {
+                                position: attacker_pos,
+                                piece: attacker_piece,
+                            });
                             break;
                         }
                         Figure::King => {
                             if distance == 0 {
-                                attackers.push(attacker_piece);
+                                attackers.push(PiecePos {
+                                    position: attacker_pos,
+                                    piece: attacker_piece,
+                                });
                             }
                             break;
                         }
@@ -376,13 +388,17 @@ impl Board {
             }
         }
 
-        return attackers;
+        if attackers.len() > 0 {
+            return Some(attackers);
+        } else {
+            return None;
+        }
     }
 
-    pub fn find_king(&self, color: Color) -> Option<FindPiece> {
+    pub fn find_king(&self, color: Color) -> Option<PiecePos> {
         for (position, piece) in &self.pieces {
             if piece.figure.is(Figure::King) && piece.color == color {
-                return Some(FindPiece {
+                return Some(PiecePos {
                     position: *position,
                     piece: &piece,
                 });
@@ -392,21 +408,121 @@ impl Board {
     }
 
     pub fn piece_move(&mut self, from: Position, to: Position) -> Option<Piece> {
-        if let Some(piece) = self.pieces.remove(&from) {
+        if let Some(mut piece) = self.pieces.remove(&from) {
+            piece.have_not_move_yet = false;
             return self.pieces.insert(to, piece);
         }
         None
     }
 
+    pub fn restorable_piece_move(&mut self, from: Position, to: Position) -> Option<Piece> {
+        self.restore = Some(Restore {
+            from: CellPos {
+                cell: match self.pieces.get(&from) {
+                    Some(piece) => Some(piece.clone()),
+                    None => None,
+                },
+                position: from,
+            },
+            to: CellPos {
+                cell: match self.pieces.get(&to) {
+                    Some(piece) => Some(piece.clone()),
+                    None => None,
+                },
+                position: to,
+            },
+        });
+
+        self.piece_move(from, to)
+    }
+
+    pub fn restore_move(&mut self) -> bool {
+        let restore = match self.restore.as_ref() {
+            Some(restore) => restore,
+            None => return false
+        };
+
+        let from = &restore.from;
+        match &from.cell {
+            Some(piece) => {
+                self.pieces.insert(from.position, piece.clone());
+            }
+            None => {
+                self.pieces.remove(&from.position);
+            }
+        }
+
+        let to = &restore.to;
+        match &to.cell {
+            Some(piece) => {
+                self.pieces.insert(to.position, piece.clone());
+            }
+            None => {
+                self.pieces.remove(&to.position);
+            }
+        }
+
+        self.restore = None;
+        true
+    }
+
+    fn moves(&self, piece: Position) -> Vec<RawMove> {
+        //match piece.piece.figure {
+        //Figure::Pawn => self.
+        //}
+        vec![]
+    }
+
+    pub fn is_checkmate(&mut self, player_color: Color) -> CheckMate {
+        let king_pos = match self.find_king(player_color) {
+            Some(k) => k.position(),
+            None => return CheckMate::No,
+        };
+
+        if self.attackers_on_position(king_pos).is_none() {
+            return CheckMate::No;
+        }
+
+        let our_pieces_pos = self
+            .pieces
+            .iter()
+            .filter(|(pos, piece)| piece.color == player_color)
+            .map(|(pos, piece)| *pos)
+            .collect::<Vec<_>>();
+
+        for piece_pos in our_pieces_pos {
+            for mv in self.moves(piece_pos) {
+                self.restorable_piece_move(mv.from, mv.to);
+                if self.attackers_on_position(king_pos).is_none() {
+                    self.restore_move();
+                    return CheckMate::Check;
+                }
+                self.restore_move();
+            }
+        }
+
+        CheckMate::Checkmate
+    }
 }
 
-pub struct FindPiece<'a> {
-    position: Position,
+pub struct PiecePos<'a> {
     piece: &'a Piece,
+    position: Position,
 }
 
-impl<'a> FindPiece<'a> {
-    pub fn position_piece(&self) -> (Position, &'a Piece) {
-        (self.position, self.piece)
+pub struct CellPos {
+    cell: Option<Piece>,
+    position: Position,
+}
+
+impl<'a> PiecePos<'a> {
+    pub fn piece_pos(&self) -> (&'a Piece, Position) {
+        (self.piece, self.position)
+    }
+    pub fn position(&self) -> Position {
+        self.position
+    }
+    pub fn piece(&self) -> &Piece {
+        self.piece
     }
 }
