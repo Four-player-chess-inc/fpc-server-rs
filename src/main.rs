@@ -3,14 +3,9 @@ mod proto;
 mod vault;
 
 use proto::{
-<<<<<<< HEAD
-    Call, Connect, ConnectError, GetInfo, Handshake, Init, LeftRook, MatchmakingQueue, Move, Pdu,
-    PlayerRegister, PlayerRegisterError, Protocol, Server, StartPosition, StartPositions,
-=======
     Connect, ConnectError, GameSession, GetInfo, Handshake, Init, MatchmakingQueue, Move, MoveCall,
     Pdu, PlayerRegister, PlayerRegisterError, PlayersStates, Protocol, Server, StartPosition,
     StartPositions, Update,
->>>>>>> new_approatch_2
 };
 
 use board::{Board, Position};
@@ -36,105 +31,10 @@ use anyhow::{Context, Result};
 
 use std::string::ToString;
 
-<<<<<<< HEAD
-struct ClientInfo {
-    name: String,
-    version: String,
-    protocol: String,
-}
-
-type Tx = UnboundedSender<Message>;
-
-enum Color {
-    Red,
-    Green,
-    Blue,
-    Yellow,
-}
-
-impl ToString for Color {
-    fn to_string(&self) -> String {
-        match self {
-            Color::Red => "Red".to_string(),
-            Color::Green => "Green".to_string(),
-            Color::Blue => "Blue".to_string(),
-            Color::Yellow => "Yellow".to_string(),
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-struct Timer {
-    timer_1: Duration,
-    timer_2: Duration
-}
-
-struct Timers {
-    red: Timer,
-    green: Timer,
-    blue: Timer,
-    yellow: Timer
-}
-
-struct GameSession {
-    who_move: Color,
-    timers : Timers
-}
-
-struct PlayerSession {
-    game_id: u64,
-    color: Color,
-    game_session: Arc<Mutex<GameSession>>,
-}
-
-impl PartialEq for PlayerSession {
-    fn eq(&self, other: &Self) -> bool {
-        self.game_id == other.game_id
-    }
-}
-
-#[derive(PartialEq)]
-enum PlayerState {
-    Idle,
-    MMQueue,
-    HeartbeatWait(Instant),
-    HeartbeatReady(Instant),
-    GameSession(PlayerSession),
-}
-
-impl PlayerState {
-    fn get_hb_wait_since(&self) -> Option<Instant> {
-        match self {
-            PlayerState::HeartbeatWait(i) => Some(*i),
-            _ => None,
-        }
-    }
-    fn get_hb_ready_since(&self) -> Option<Instant> {
-        match self {
-            PlayerState::HeartbeatReady(i) => Some(*i),
-            _ => None,
-        }
-    }
-    fn is_hb_wait(&self) -> bool {
-        matches!(self, PlayerState::HeartbeatWait(_))
-    }
-    fn is_hb_ready(&self) -> bool {
-        matches!(self, PlayerState::HeartbeatReady(_))
-    }
-}
-
-struct Peer {
-    tx: Tx,
-    player_name: Option<String>,
-    state: PlayerState,
-    client_info: Option<ClientInfo>,
-}
-=======
 use crate::proto::MoveError;
 use crate::vault::WhoMove;
 use rand::{distributions::Alphanumeric, Rng};
 use tokio::sync::mpsc::UnboundedSender;
->>>>>>> new_approatch_2
 
 type Vault = Arc<RwLock<vault::Vault>>;
 
@@ -144,11 +44,6 @@ const SERV_VER: &str = "0.0.1";
 static HB_DISP_TICK_PERIOD: Duration = Duration::from_secs(1);
 static HB_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
 static HB_READY_TIMEOUT: Duration = Duration::from_secs(5);
-<<<<<<< HEAD
-static GS_INIT_PAUSE: tokio::time::Duration = tokio::time::Duration::from_secs(10);
-static PLAYER_INITIAL_TIMER_1: Duration = Duration::from_secs(10);
-static PLAYER_INITIAL_TIMER_2: Duration = Duration::from_secs(2);
-=======
 static GS_INIT_PAUSE: Duration = Duration::from_secs(10);
 static PLAYER_TIMER: Duration = Duration::from_secs(60);
 static PLAYER_TIME_2: Duration = Duration::from_secs(5);
@@ -205,7 +100,6 @@ fn random_string() -> String {
         .map(char::from)
         .collect()
 }
->>>>>>> new_approatch_2
 
 async fn process_hs_get_info(vault: &Vault, addr: &SocketAddr) -> Result<()> {
     let resp = Pdu::Handshake(Handshake::GetInfo(GetInfo::Ok {
@@ -495,13 +389,6 @@ async fn handle_connection(vault: Vault, raw_stream: TcpStream, addr: SocketAddr
                 if let Err(e) = process_msg(&p, arg.1, arg.0).await {
                     error!("Error while process_msg() {}", e);
                 }
-<<<<<<< HEAD
-            },
-            Err(e) => error!(
-                "Parsing received message from peer {} failed with message \"{}\"",
-                addr, e
-            ),
-=======
             }
             Err(e) => {
                 error!(
@@ -509,7 +396,6 @@ async fn handle_connection(vault: Vault, raw_stream: TcpStream, addr: SocketAddr
                     addr, e
                 );
             }
->>>>>>> new_approatch_2
         }
         arg
     });
@@ -523,28 +409,6 @@ async fn handle_connection(vault: Vault, raw_stream: TcpStream, addr: SocketAddr
     vault.read().await.remove_peer(&addr).await;
 }
 
-<<<<<<< HEAD
-async fn game_session_starter(peer_map: PeerMap, game_id: u64) {
-    tokio::time::sleep(GS_INIT_PAUSE).await;
-    let call = Pdu::GameSession(proto::GameSession::Move(Move::Call(Call {
-        player: "Red".to_string(),
-        timer: 10,
-        timer_2: 1,
-    })));
-    let call = serde_json::to_string(&call).unwrap();
-    let call = Message::Text(call);
-    let lock = peer_map.lock().unwrap();
-    let gamers = lock
-        .iter()
-        .filter(
-            |(_, peer)| matches!(&peer.state, PlayerState::GameSession(e) if e.game_id == game_id),
-        )
-        .map(|(_, peer)| peer);
-    for peer in gamers {
-        match peer.tx.unbounded_send(call.clone()) {
-            Ok(_) => (),
-            Err(e) => error!("unbounded_send failed \"{}\"", e),
-=======
 async fn move_call_dispatch(
     vault: Vault,
     mut move_received: UnboundedReceiver<()>,
@@ -707,7 +571,6 @@ async fn move_call_dispatch(
                 game_lock.who_move = None;
                 break;
             }
->>>>>>> new_approatch_2
         }
 
         /*if game_lock.next_moved_player_mut().is_none() {
@@ -870,94 +733,6 @@ async fn matchmaking_dispatcher(vault: Vault) {
         }
 
         // Now create GameSession form the HeartbeatReady players and broadcast init
-<<<<<<< HEAD
-        let mut mm_ready: Vec<&mut Peer> = lock
-            .iter_mut()
-            .filter(|(_, peer)| peer.state.is_hb_ready())
-            .map(|(_, peer)| peer)
-            .collect();
-        for chunk in mm_ready.chunks_exact_mut(4) {
-            let mut iter = chunk.iter_mut();
-            let red = iter.next().unwrap();
-            let initial_timer = Timer {
-                timer_1: PLAYER_INITIAL_TIMER_1,
-                timer_2: PLAYER_INITIAL_TIMER_2
-            };
-            let initial_timers = Timers {
-                red: initial_timer,
-                green: initial_timer,
-                blue: initial_timer,
-                yellow: initial_timer
-            };
-            let game_session = Arc::new(Mutex::new(GameSession {
-                who_move: Color::Red,
-                timers: initial_timers
-            }));
-            // TODO: prevent duplicate game_id
-            red.state = PlayerState::GameSession(PlayerSession {
-                game_id,
-                color: Color::Red,
-                game_session: game_session.clone(),
-            });
-            let green = iter.next().unwrap();
-            green.state = PlayerState::GameSession(PlayerSession {
-                game_id,
-                color: Color::Green,
-                game_session: game_session.clone(),
-            });
-            let blue = iter.next().unwrap();
-            blue.state = PlayerState::GameSession(PlayerSession {
-                game_id,
-                color: Color::Blue,
-                game_session: game_session.clone(),
-            });
-            let yellow = iter.next().unwrap();
-            yellow.state = PlayerState::GameSession(PlayerSession {
-                game_id,
-                color: Color::Yellow,
-                game_session: game_session.clone(),
-            });
-
-            let init_pdu = Pdu::GameSession(proto::GameSession::Init(Init {
-                countdown: GS_INIT_PAUSE.as_secs(),
-                start_positions: StartPositions {
-                    red: StartPosition {
-                        player_name: red.player_name.clone().unwrap(),
-                        left_rook: LeftRook {
-                            letter: 'D',
-                            number: 1,
-                        },
-                    },
-                    green: StartPosition {
-                        player_name: green.player_name.clone().unwrap(),
-                        left_rook: LeftRook {
-                            letter: 'D',
-                            number: 1,
-                        },
-                    },
-                    blue: StartPosition {
-                        player_name: blue.player_name.clone().unwrap(),
-                        left_rook: LeftRook {
-                            letter: 'D',
-                            number: 1,
-                        },
-                    },
-                    yellow: StartPosition {
-                        player_name: green.player_name.clone().unwrap(),
-                        left_rook: LeftRook {
-                            letter: 'D',
-                            number: 1,
-                        },
-                    },
-                },
-            }));
-            let init_pdu = serde_json::to_string(&init_pdu).unwrap();
-            let init_pdu = Message::Text(init_pdu);
-            for peer in [red, green, blue, yellow].iter() {
-                match peer.tx.unbounded_send(init_pdu.clone()) {
-                    Ok(_) => (),
-                    Err(e) => error!("unbounded_send failed \"{}\"", e),
-=======
         {
             let hb_ready_lock = lock.get_hb_ready().await;
             let mut games_lock = lock.get_games().await;
@@ -1101,7 +876,6 @@ async fn matchmaking_dispatcher(vault: Vault) {
                         game_id = game_id.wrapping_add(1);
                         tmp_peers.clear();
                     }
->>>>>>> new_approatch_2
                 }
             }
         }
