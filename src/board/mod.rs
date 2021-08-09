@@ -1,17 +1,13 @@
 pub mod position;
 
 use crate::vault::Color;
+use anyhow::{Context, Result};
 use enum_iterator::IntoEnumIterator;
 use once_cell::sync::Lazy;
-pub use position::{Column, Position, Row};
+pub use position::{Column, Direction, Line, Position, Row};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::convert::TryFrom;
-
-/*struct Piece {
-    color: Color,
-    piece:
-}*/
 
 pub struct CastlingPattern {
     pub space_between: Vec<Position>,
@@ -112,12 +108,6 @@ impl Figure {
     pub fn is(&self, figure: Figure) -> bool {
         matches!(self, figure)
     }
-}
-
-#[derive(Clone)]
-pub enum Line {
-    Column(Column),
-    Row(Row),
 }
 
 #[derive(Clone)]
@@ -439,7 +429,7 @@ impl<'a> Board {
     pub fn restore_move(&mut self) -> bool {
         let restore = match self.restore.as_ref() {
             Some(restore) => restore,
-            None => return false
+            None => return false,
         };
 
         let from = &restore.from;
@@ -466,11 +456,199 @@ impl<'a> Board {
         true
     }
 
-    fn moves(&self, piece: Position) -> Vec<RawMove> {
-        //match piece.piece.figure {
-        //Figure::Pawn => self.
-        //}
-        vec![]
+    fn moves_pawn(
+        &self,
+        pos: Position,
+        our_color: Color,
+        home_line: Line,
+        have_not_move_yet: bool,
+    ) -> Vec<RawMove> {
+        let directions = Direction::try_all_from_home_line(home_line).unwrap();
+        let mut moves = Vec::new();
+
+        if have_not_move_yet {
+            let step_to = pos.step(&directions.forward, 2).unwrap();
+            if self.piece(step_to).is_none() {
+                moves.push(RawMove {
+                    from: pos,
+                    to: step_to,
+                });
+            }
+        }
+
+        if let Ok(step_to) = pos.step(&directions.forward, 1) {
+            if self.piece(step_to).is_none() {
+                moves.push(RawMove {
+                    from: pos,
+                    to: step_to,
+                });
+            }
+        }
+
+        if let Ok(eat_to) = pos.step(&directions.forward_left, 1) {
+            if let Some(piece) = self.piece(eat_to) {
+                if piece.color != our_color {
+                    moves.push(RawMove {
+                        from: pos,
+                        to: eat_to,
+                    });
+                }
+            }
+        }
+
+        if let Ok(eat_to) = pos.step(&directions.forward_right, 1) {
+            if let Some(piece) = self.piece(eat_to) {
+                if piece.color != our_color {
+                    moves.push(RawMove {
+                        from: pos,
+                        to: eat_to,
+                    });
+                }
+            }
+        }
+        return moves;
+    }
+
+    fn moves_lines(
+        &self,
+        directions: &Vec<&Direction>,
+        max_distance: usize,
+        pos: Position,
+        our_color: Color,
+    ) -> Vec<RawMove> {
+        let mut moves = Vec::new();
+
+        for direction in directions {
+            for step_dist in 1..=max_distance {
+                if let Ok(step_to) = pos.step(direction, step_dist as usize) {
+                    if let Some(piece) = self.piece(step_to) {
+                        if piece.color != our_color {
+                            moves.push(RawMove {
+                                from: pos,
+                                to: step_to,
+                            });
+                        }
+                        break;
+                    } else {
+                        moves.push(RawMove {
+                            from: pos,
+                            to: step_to,
+                        });
+                    }
+                } else {
+                    break;
+                }
+            }
+        }
+        moves
+    }
+
+    fn moves_rook(&self, pos: Position, our_color: Color, home_line: Line) -> Vec<RawMove> {
+        let directions = Direction::try_all_from_home_line(home_line).unwrap();
+        let rook_dirs = vec![
+            &directions.forward,
+            &directions.right,
+            &directions.backward,
+            &directions.left,
+        ];
+
+        let max_distance = Row::R13.get_index() as usize;
+        self.moves_lines(&rook_dirs, max_distance, pos, our_color)
+    }
+
+    fn moves_knight(&self, pos: Position, our_color: Color, home_line: Line) -> Vec<RawMove> {
+        let mut moves = Vec::new();
+        let knights_shifts = [
+            (2, 1),
+            (1, 2),
+            (2, -1),
+            (1, -2),
+            (-2, 1),
+            (-1, 2),
+            (-2, -1),
+            (-1, -2),
+        ];
+
+        for knight_shift in knights_shifts.iter() {
+            let position_to = Position::try_from((
+                pos.column().get_index() + knight_shift.0,
+                pos.row().get_index() + knight_shift.1,
+            ));
+            if let Ok(step_to) = position_to {
+                if let Some(piece) = self.piece(step_to) {
+                    if piece.color == our_color {
+                        continue;
+                    }
+                }
+                moves.push(RawMove {
+                    from: pos,
+                    to: step_to,
+                });
+            }
+        }
+        moves
+    }
+
+    fn moves_bishop(&self, pos: Position, our_color: Color, home_line: Line) -> Vec<RawMove> {
+        let directions = Direction::try_all_from_home_line(home_line).unwrap();
+        let bishop_dirs = vec![
+            &directions.forward_right,
+            &directions.backward_right,
+            &directions.backward_left,
+            &directions.forward_left,
+        ];
+        let max_distance = Row::R13.get_index() as usize;
+        self.moves_lines(&bishop_dirs, max_distance, pos, our_color)
+    }
+
+    fn moves_queen(&self, pos: Position, our_color: Color, home_line: Line) -> Vec<RawMove> {
+        let directions = Direction::try_all_from_home_line(home_line).unwrap();
+        let bishop_dirs = vec![
+            &directions.forward,
+            &directions.forward_right,
+            &directions.right,
+            &directions.backward_right,
+            &directions.backward,
+            &directions.backward_left,
+            &directions.left,
+            &directions.forward_left,
+        ];
+        let max_distance = Row::R13.get_index() as usize;
+        self.moves_lines(&bishop_dirs, max_distance, pos, our_color)
+    }
+
+    fn moves_king(&self, pos: Position, our_color: Color, home_line: Line) -> Vec<RawMove> {
+        let directions = Direction::try_all_from_home_line(home_line).unwrap();
+        let bishop_dirs = vec![
+            &directions.forward,
+            &directions.forward_right,
+            &directions.right,
+            &directions.backward_right,
+            &directions.backward,
+            &directions.backward_left,
+            &directions.left,
+            &directions.forward_left,
+        ];
+        let max_distance = 1;
+        self.moves_lines(&bishop_dirs, max_distance, pos, our_color)
+    }
+
+    fn moves(&self, piece_pos: Position) -> Result<Vec<RawMove>> {
+        let piece = self.piece(piece_pos).context("no piece")?;
+
+        return match piece.figure {
+            Figure::Pawn => Ok(self.moves_pawn(
+                piece_pos,
+                piece.color,
+                piece.home_line,
+                piece.have_not_move_yet,
+            )),
+            Figure::Rook => Ok(self.moves_rook(piece_pos, piece.color, piece.home_line)),
+            Figure::Knight => Ok(self.moves_knight(piece_pos, piece.color, piece.home_line)),
+            Figure::Bishop => Ok(self.moves_bishop(piece_pos, piece.color, piece.home_line)),
+            Figure::Queen => Ok(self.moves_queen(piece_pos, piece.color, piece.home_line)),
+            Figure::King => Ok(self.moves_king(piece_pos, piece.color, piece.home_line)),
+        };
     }
 
     pub fn is_checkmate(&mut self, player_color: Color) -> CheckMate {
@@ -491,7 +669,7 @@ impl<'a> Board {
             .collect::<Vec<_>>();
 
         for piece_pos in our_pieces_pos {
-            for mv in self.moves(piece_pos) {
+            for mv in self.moves(piece_pos).unwrap() {
                 self.restorable_piece_move(mv.from, mv.to);
                 if self.attackers_on_position(king_pos).is_none() {
                     self.restore_move();
